@@ -1,0 +1,197 @@
+/* ═══════════════════════════════════════════
+   MatchDay – Settings Page Styles
+   ═══════════════════════════════════════════ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0a1a;
+    color: #f0f0f5;
+    min-height: 100vh;
+    padding: 40px 20px;
+    -webkit-font-smoothing: antialiased;
+}
+
+.settings-container {
+    max-width: 520px;
+    margin: 0 auto;
+}
+
+.settings-header {
+    margin-bottom: 32px;
+}
+
+.settings-logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+
+.settings-logo span {
+    font-size: 28px;
+}
+
+.settings-logo h1 {
+    font-size: 24px;
+    font-weight: 800;
+    background: linear-gradient(135deg, #00e676, #00bcd4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.settings-subtitle {
+    color: #8888aa;
+    font-size: 14px;
+}
+
+.settings-section {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 16px;
+}
+
+.settings-section h2 {
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.section-desc {
+    color: #8888aa;
+    font-size: 13px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.input-group {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.input-group input {
+    flex: 1;
+    padding: 10px 14px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    color: #f0f0f5;
+    font-size: 13px;
+    font-family: 'Inter', sans-serif;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.input-group input:focus {
+    border-color: #00e676;
+}
+
+.btn-icon {
+    width: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    color: #8888aa;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-icon:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #f0f0f5;
+}
+
+.btn-primary {
+    padding: 10px 24px;
+    background: linear-gradient(135deg, #00e676, #00bcd4);
+    border: none;
+    border-radius: 10px;
+    color: #0a0a1a;
+    font-size: 13px;
+    font-weight: 700;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 0 20px rgba(0, 230, 118, 0.2);
+}
+
+.btn-secondary {
+    padding: 10px 24px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+    color: #f0f0f5;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.link-help {
+    display: inline-block;
+    margin-top: 12px;
+    color: #8888aa;
+    font-size: 12px;
+    text-decoration: none;
+    transition: color 0.2s;
+}
+
+.link-help:hover {
+    color: #00e676;
+}
+
+.status-msg {
+    display: inline-block;
+    margin-left: 12px;
+    font-size: 12px;
+    color: #00e676;
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+.status-msg.visible {
+    opacity: 1;
+}
+
+.about-info {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.about-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 13px;
+}
+
+.about-row span:first-child {
+    color: #8888aa;
+}
+
+.about-row span:last-child {
+    font-weight: 600;
+}
