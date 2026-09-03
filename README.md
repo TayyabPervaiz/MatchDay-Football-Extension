@@ -23,7 +23,14 @@ A lightweight, modern Google Chrome extension (Manifest V3) that lets football f
 - **Chrome APIs:** `chrome.storage`, `chrome.alarms`, `chrome.action`
 
 ---
+##📱Screenshots
+<p align="center">
+  <img width="30%" src="https://github.com/user-attachments/assets/70f80335-8858-4a20-8b16-e1caf4e95967" />
+  <img width="30%" src="https://github.com/user-attachments/assets/6269181a-4c40-4240-94e6-6d5950e512f5" />
+  <img width="30%" src="https://github.com/user-attachments/assets/9bc13471-6b53-4314-be76-e023cf1afb60" />
+</p>
 
+---
 ## 🚀 Installation & Loading Locally
 
 1. Clone or download this repository:
