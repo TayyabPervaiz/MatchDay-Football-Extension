@@ -9,6 +9,12 @@
     "https://vipbox.ga/*",
     "https://hoofoot.net/*"
   ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "matchday-fixtures@tayyab.dev",
+      "strict_min_version": "109.0"
+    }
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -23,7 +29,11 @@
     "128": "icons/icon128.png"
   },
   "background": {
+    "scripts": ["background.js"],
     "service_worker": "background.js"
   },
-  "options_page": "settings.html"
+  "options_ui": {
+    "page": "settings.html",
+    "open_in_tab": true
+  }
 }
