@@ -1,16 +1,19 @@
 /* ═══════════════════════════════════════════
    MatchDay – Popup Logic (FotMob/Flashscore UX)
+   High Density, Accessible, WCAG AA Compliant
    ═══════════════════════════════════════════ */
 
 // ── State ───────────────────────────────
 let currentTab = 'matches';
 let currentDateRange = 'today';
 let currentSubFilter = 'all'; // 'all' | 'live' | 'followed'
-let selectedLeagues = ['PL', 'CL'];
+let selectedLeagues = ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'];
 let followedTeams = [];
 let allLeagues = {};
 let currentMatches = [];
-const teamsCache = new Map(); // In-memory lookup to avoid JSON attribute escaping bugs
+let collapsedLeagues = new Set();
+let lastFetchTimestamp = null;
+const teamsCache = new Map(); // In-memory lookup
 
 // ── DOM Refs ────────────────────────────
 const $ = (sel) => document.querySelector(sel);
@@ -30,8 +33,9 @@ const teamSearchInput = $('#teamSearch');
 const statusText = $('#statusText');
 const lastUpdated = $('#lastUpdated');
 const liveBadgeCount = $('#liveBadgeCount');
+const filterLiveBtn = $('#filterLive');
 
-const CREST_FALLBACK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23555570'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E";
+const CREST_FALLBACK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236d738f'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E";
 
 // ── Error Boundary for Images ───────────
 document.addEventListener('error', (e) => {
@@ -41,13 +45,55 @@ document.addEventListener('error', (e) => {
   }
 }, true);
 
-// ── Delegated Link Opener (chrome.tabs.create) ─
+// ── Delegated Card & Link Opener ─────────
 document.addEventListener('click', (e) => {
+  // 1. Team star follow button
+  const starBtn = e.target.closest('.team-star-btn');
+  if (starBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const teamId = Number(starBtn.dataset.teamId);
+    const teamName = starBtn.dataset.teamName;
+    const teamCrest = starBtn.dataset.teamCrest;
+    const compName = starBtn.dataset.compName;
+    toggleFollowTeamSimple({ id: teamId, name: teamName, crest: teamCrest, competitionName: compName });
+    return;
+  }
+
+  // 2. Direct media buttons (Watch Live / Full Highlights / Stream)
   const linkBtn = e.target.closest('.open-tab-link');
   if (linkBtn && linkBtn.dataset.url) {
     e.preventDefault();
     e.stopPropagation();
     chrome.tabs.create({ url: linkBtn.dataset.url });
+    return;
+  }
+
+  // 3. Whole match card click (opens primary source / stream / highlights)
+  const matchCard = e.target.closest('.match-card');
+  if (matchCard && matchCard.dataset.primaryUrl) {
+    e.preventDefault();
+    chrome.tabs.create({ url: matchCard.dataset.primaryUrl });
+    return;
+  }
+
+  // 4. League Header Collapse / Expand
+  const compHeader = e.target.closest('.competition-header');
+  if (compHeader && compHeader.dataset.compCode) {
+    e.preventDefault();
+    toggleLeagueCollapse(compHeader.dataset.compCode);
+    return;
+  }
+});
+
+// ── Keyboard Accessibility for Cards ────
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    const card = document.activeElement?.closest?.('.match-card');
+    if (card && card.dataset.primaryUrl && !e.target.closest('button')) {
+      e.preventDefault();
+      chrome.tabs.create({ url: card.dataset.primaryUrl });
+    }
   }
 });
 
@@ -66,22 +112,6 @@ function formatLocalDate(d) {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
-  // ── Left column contextual label ───────────────────────────────────────
-  let leftColHtml = '';
-  if (dateRange === 'week') {
-    const d = new Date(match.utcDate);
-    const weekday = d.toLocaleDateString([], { weekday: 'short' }).toUpperCase().slice(0, 3);
-    const day = d.getDate();
-    leftColHtml = `<span class="card-left-label date-label">${weekday}<br>${day}</span>`;
-  } else if (isLive) {
-    const elapsed = match.minute != null ? `${match.minute}'` : (status === 'PAUSED' ? 'HT' : 'LIVE');
-    leftColHtml = `<span class="card-left-label live-label"><span class="live-dot-sm"></span>${elapsed}</span>`;
-  } else if (isFinished) {
-    leftColHtml = `<span class="card-left-label ft-label">FT</span>`;
-  } else {
-    leftColHtml = `<span class="card-left-label time-label">${matchTime}</span>`;
-  }
-
   return `${year}-${month}-${day}`;
 }
 
@@ -98,13 +128,14 @@ async function init() {
   }
 
   // Load saved state
-  const stored = await chrome.storage.local.get(['selectedLeagues', 'followedTeams']);
+  const stored = await chrome.storage.local.get(['selectedLeagues', 'followedTeams', 'collapsedLeagues']);
   selectedLeagues = (stored.selectedLeagues && stored.selectedLeagues.length > 2)
     ? stored.selectedLeagues
     : ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'];
   followedTeams = stored.followedTeams || [];
+  collapsedLeagues = new Set(stored.collapsedLeagues || []);
 
-  // If selected leagues were restricted to only 2, expand to top leagues for full coverage
+  // Ensure default leagues saved
   if (!stored.selectedLeagues || stored.selectedLeagues.length <= 2) {
     chrome.storage.local.set({ selectedLeagues });
   }
@@ -112,7 +143,7 @@ async function init() {
   // Populate cache with existing followed teams
   followedTeams.forEach(t => teamsCache.set(t.id, t));
 
-  // Get leagues data
+  // Get leagues data from background
   chrome.runtime.sendMessage({ type: 'GET_LEAGUES' }, (res) => {
     if (res?.success) {
       allLeagues = res.data;
@@ -120,7 +151,7 @@ async function init() {
     }
   });
 
-  // Setup event listeners
+  // Setup UI event listeners
   setupTabNav();
   setupDateFilter();
   setupSubFilters();
@@ -128,14 +159,26 @@ async function init() {
   setupRefresh();
   setupSettings();
   setupTeamSearch();
+  setupOfflineListeners();
   updateTabIndicator();
 
-  // Load matches
+  // Load initial matches
   loadMatches();
   renderFollowedTeams();
 
-  // Periodic active countdown tick & auto-poll
+  // Periodic active countdown tick & auto-poll (30s)
   setInterval(tickTimersAndLiveScores, 30 * 1000);
+}
+
+// ── Offline / Online Listeners ──────────
+function setupOfflineListeners() {
+  window.addEventListener('online', () => {
+    setStatus('Back online');
+    if (currentTab === 'matches') loadMatches(true);
+  });
+  window.addEventListener('offline', () => {
+    setStatus('Offline');
+  });
 }
 
 // ── API Key Form ────────────────────────
@@ -160,7 +203,11 @@ function setupTabNav() {
 
 function switchTab(tab) {
   currentTab = tab;
-  $$('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('.tab-btn').forEach(b => {
+    const isActive = b.dataset.tab === tab;
+    b.classList.toggle('active', isActive);
+    b.setAttribute('aria-selected', String(isActive));
+  });
   $$('.tab-content').forEach(c => c.classList.remove('active'));
   $(`#${tab}Tab`).classList.add('active');
   updateTabIndicator();
@@ -184,12 +231,16 @@ function updateTabIndicator() {
   }
 }
 
-// ── Date Filter Bar ─────────────────────
+// ── Date Segmented Control ──────────────
 function setupDateFilter() {
   $$('.date-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       currentDateRange = btn.dataset.range;
-      $$('.date-btn').forEach(b => b.classList.toggle('active', b === btn));
+      $$('.date-btn').forEach(b => {
+        const isCurrent = b === btn;
+        b.classList.toggle('active', isCurrent);
+        b.setAttribute('aria-pressed', String(isCurrent));
+      });
       loadMatches();
     });
   });
@@ -215,7 +266,6 @@ function getDateRange() {
       return { from: str, to: str };
     }
     case 'week': {
-      // Full Gameweek: covers past 3 days (weekend results) + Today + next 4 days (upcoming fixtures)
       const wFrom = new Date(today);
       wFrom.setDate(wFrom.getDate() - 3);
       const wTo = new Date(today);
@@ -234,16 +284,27 @@ function setupSubFilters() {
   $$('.filter-chip').forEach(chip => {
     chip.addEventListener('click', () => {
       currentSubFilter = chip.dataset.filter;
-      $$('.filter-chip').forEach(c => c.classList.toggle('active', c === chip));
+      $$('.filter-chip').forEach(c => {
+        const isCurrent = c === chip;
+        c.classList.toggle('active', isCurrent);
+        c.setAttribute('aria-pressed', String(isCurrent));
+      });
       applyFiltersAndRender();
     });
   });
 }
 
 // ── Load Matches ────────────────────────
-async function loadMatches() {
-  showMatchesSkeleton();
-  setStatus('Fetching matches...');
+async function loadMatches(isSilent = false) {
+  if (!navigator.onLine) {
+    showMatchesError('You are offline. Reconnect to load live fixtures.', true);
+    return;
+  }
+
+  if (!isSilent) {
+    showMatchesSkeleton();
+    setStatus('Fetching matches...');
+  }
 
   const { from, to } = getDateRange();
 
@@ -263,10 +324,11 @@ async function loadMatches() {
     }
     if (res.success) {
       currentMatches = res.data || [];
-      updateLiveBadge();
+      lastFetchTimestamp = Date.now();
+      updateLiveBadgeAndEmphasis();
       applyFiltersAndRender();
       setStatus(`${currentMatches.length} match${currentMatches.length !== 1 ? 'es' : ''} loaded`);
-      setLastUpdated();
+      updateRelativeTime();
     } else {
       if (res.error === 'NO_API_KEY') {
         apiKeyOverlay.classList.remove('hidden');
@@ -281,11 +343,22 @@ async function loadMatches() {
   });
 }
 
-// ── Update Live Badge Count ─────────────
-function updateLiveBadge() {
+// ── Update Live Badge Count & Visual Prominence ──
+function updateLiveBadgeAndEmphasis() {
   const liveCount = currentMatches.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED').length;
-  if (liveBadgeCount) {
-    liveBadgeCount.textContent = liveCount;
+
+  if (liveBadgeCount && filterLiveBtn) {
+    if (liveCount > 0) {
+      liveBadgeCount.textContent = liveCount;
+      liveBadgeCount.classList.remove('hidden');
+      filterLiveBtn.classList.add('has-live');
+      filterLiveBtn.classList.remove('dim-when-zero');
+    } else {
+      liveBadgeCount.textContent = '0';
+      liveBadgeCount.classList.add('hidden');
+      filterLiveBtn.classList.remove('has-live');
+      filterLiveBtn.classList.add('dim-when-zero');
+    }
   }
 }
 
@@ -308,35 +381,68 @@ function applyFiltersAndRender() {
 // ── Render Matches (FotMob / Flashscore Grouping) ─
 function renderMatchesList(matches) {
   if (!matches || matches.length === 0) {
-    let emptyMsg = 'No matches scheduled for this specific date.';
-    if (currentSubFilter === 'live') emptyMsg = 'No live matches in progress right now.';
-    if (currentSubFilter === 'followed') emptyMsg = 'None of your followed clubs are playing in this period.';
+    let emptyTitle = 'No Matches Today';
+    let emptyMsg = 'No matches scheduled for today.';
+    let actionBtnText = 'View Tomorrow';
+    let actionTarget = 'tomorrow';
+
+    if (currentSubFilter === 'live') {
+      emptyTitle = 'No Live Matches';
+      emptyMsg = 'No matches are currently in play.';
+      actionBtnText = 'View All Matches';
+      actionTarget = 'all_subfilter';
+    } else if (currentSubFilter === 'followed') {
+      emptyTitle = 'No Followed Teams Playing';
+      emptyMsg = 'None of your followed clubs are playing in this period.';
+      actionBtnText = 'Follow More Clubs';
+      actionTarget = 'following_tab';
+    } else {
+      if (currentDateRange === 'yesterday') {
+        emptyTitle = 'No Matches Yesterday';
+        emptyMsg = 'No fixtures took place yesterday.';
+        actionBtnText = 'View Today';
+        actionTarget = 'today';
+      } else if (currentDateRange === 'tomorrow') {
+        emptyTitle = 'No Matches Tomorrow';
+        emptyMsg = 'No fixtures scheduled for tomorrow.';
+        actionBtnText = 'View This Week';
+        actionTarget = 'week';
+      } else if (currentDateRange === 'week') {
+        emptyTitle = 'No Fixtures This Week';
+        emptyMsg = 'No fixtures found in your selected leagues.';
+        actionBtnText = 'Manage Leagues';
+        actionTarget = 'leagues_tab';
+      }
+    }
 
     matchesList.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">⚽</div>
-        <h3>No Matches Found</h3>
-        <p>${emptyMsg}</p>
-        <div style="display:flex;gap:8px;margin-top:12px;justify-content:center;">
-          <button class="date-btn" id="emptyGoYesterday" style="padding:6px 12px;font-size:11px;">📅 View Yesterday</button>
-          <button class="date-btn" id="emptyGoWeek" style="padding:6px 12px;font-size:11px;">🗓️ View This Week</button>
+        <div class="empty-icon" aria-hidden="true">⚽</div>
+        <h3>${escapeHtml(emptyTitle)}</h3>
+        <p>${escapeHtml(emptyMsg)}</p>
+        <div class="empty-actions">
+          <button class="date-btn active" id="emptyActionBtn" style="padding: 6px 14px; font-size: 11.5px;">
+            ${escapeHtml(actionBtnText)}
+          </button>
         </div>
       </div>`;
 
-    const btnYest = $('#emptyGoYesterday');
-    const btnWeek = $('#emptyGoWeek');
-    if (btnYest) {
-      btnYest.addEventListener('click', () => {
-        currentDateRange = 'yesterday';
-        $$('.date-btn').forEach(b => b.classList.toggle('active', b.dataset.range === 'yesterday'));
-        loadMatches();
-      });
-    }
-    if (btnWeek) {
-      btnWeek.addEventListener('click', () => {
-        currentDateRange = 'week';
-        $$('.date-btn').forEach(b => b.classList.toggle('active', b.dataset.range === 'week'));
-        loadMatches();
+    const actionBtn = $('#emptyActionBtn');
+    if (actionBtn) {
+      actionBtn.addEventListener('click', () => {
+        if (actionTarget === 'all_subfilter') {
+          currentSubFilter = 'all';
+          $$('.filter-chip').forEach(c => c.classList.toggle('active', c.dataset.filter === 'all'));
+          applyFiltersAndRender();
+        } else if (actionTarget === 'following_tab') {
+          switchTab('following');
+        } else if (actionTarget === 'leagues_tab') {
+          switchTab('leagues');
+        } else {
+          currentDateRange = actionTarget;
+          $$('.date-btn').forEach(b => b.classList.toggle('active', b.dataset.range === actionTarget));
+          loadMatches();
+        }
       });
     }
     return;
@@ -347,35 +453,83 @@ function renderMatchesList(matches) {
   matches.forEach(m => {
     const compCode = m.competitionCode || m.competition?.code || 'OTHER';
     if (!grouped.has(compCode)) {
+      const meta = allLeagues[compCode] || {};
       grouped.set(compCode, {
         code: compCode,
-        name: m.competitionName || m.competition?.name || 'League',
-        emoji: m.competitionEmoji || '⚽',
+        name: m.competitionName || meta.name || m.competition?.name || 'League',
+        emoji: m.competitionEmoji || meta.emoji || '⚽',
+        priority: meta.priority || 99,
+        hasLive: false,
         matches: []
       });
     }
-    grouped.get(compCode).matches.push(m);
+    const group = grouped.get(compCode);
+    group.matches.push(m);
+    if (m.status === 'IN_PLAY' || m.status === 'PAUSED') {
+      group.hasLive = true;
+    }
+  });
+
+  // Sort League Groups:
+  // 1. Leagues with active live games first
+  // 2. Followed leagues / containing followed clubs
+  // 3. Official league priority tier
+  const followedIds = new Set(followedTeams.map(t => t.id));
+  const sortedGroups = Array.from(grouped.values()).sort((a, b) => {
+    if (a.hasLive !== b.hasLive) return a.hasLive ? -1 : 1;
+
+    const aFollowed = a.matches.some(m => followedIds.has(m.homeTeam?.id) || followedIds.has(m.awayTeam?.id));
+    const bFollowed = b.matches.some(m => followedIds.has(m.homeTeam?.id) || followedIds.has(m.awayTeam?.id));
+    if (aFollowed !== bFollowed) return aFollowed ? -1 : 1;
+
+    return a.priority - b.priority;
   });
 
   let html = '';
-  for (const group of grouped.values()) {
+  for (const group of sortedGroups) {
+    const isCollapsed = collapsedLeagues.has(group.code);
+    const countLabel = `${group.matches.length} ${group.matches.length === 1 ? 'match' : 'matches'}`;
+
     html += `
-      <div class="match-competition-group">
-        <div class="competition-header">
+      <div class="match-competition-group ${isCollapsed ? 'collapsed' : ''}" data-comp-code="${escapeHtml(group.code)}">
+        <div class="competition-header" data-comp-code="${escapeHtml(group.code)}" role="button" aria-expanded="${!isCollapsed}" tabindex="0" title="Click to collapse / expand">
           <div class="competition-title">
-            <span class="competition-emoji">${escapeHtml(group.emoji)}</span>
+            <span class="competition-badge-icon" aria-hidden="true">${escapeHtml(group.emoji)}</span>
             <span>${escapeHtml(group.name)}</span>
           </div>
-          <span class="competition-count">${group.matches.length}</span>
+          <div class="competition-right">
+            <span class="competition-count">${countLabel}</span>
+            <span class="competition-chevron" aria-hidden="true">▼</span>
+          </div>
         </div>
-        ${group.matches.map(m => renderMatchCard(m, currentDateRange)).join('')}
+        <div class="matches-in-group">
+          ${group.matches.map(m => renderMatchCard(m, currentDateRange)).join('')}
+        </div>
       </div>`;
   }
 
   matchesList.innerHTML = html;
 }
 
-// ── Render Match Card with Direct Links ─
+// ── Toggle League Collapse State ────────
+function toggleLeagueCollapse(compCode) {
+  if (collapsedLeagues.has(compCode)) {
+    collapsedLeagues.delete(compCode);
+  } else {
+    collapsedLeagues.add(compCode);
+  }
+  chrome.storage.local.set({ collapsedLeagues: Array.from(collapsedLeagues) });
+
+  const groupEl = document.querySelector(`.match-competition-group[data-comp-code="${compCode}"]`);
+  if (groupEl) {
+    const isNowCollapsed = collapsedLeagues.has(compCode);
+    groupEl.classList.toggle('collapsed', isNowCollapsed);
+    const header = groupEl.querySelector('.competition-header');
+    if (header) header.setAttribute('aria-expanded', String(!isNowCollapsed));
+  }
+}
+
+// ── Render Match Card with Direct Links & Team Star ─
 function renderMatchCard(match, dateRange) {
   const homeTeam = match.homeTeam || {};
   const awayTeam = match.awayTeam || {};
@@ -385,68 +539,122 @@ function renderMatchCard(match, dateRange) {
   const isLive = status === 'IN_PLAY' || status === 'PAUSED';
   const isFinished = status === 'FINISHED';
 
+  // Contextual Left Column
+  let leftColHtml = '';
+  if (dateRange === 'week') {
+    const d = new Date(match.utcDate);
+    const weekday = d.toLocaleDateString([], { weekday: 'short' }).toUpperCase().slice(0, 3);
+    const day = d.getDate();
+    leftColHtml = `<span class="card-left-label date-label" aria-label="${weekday} ${day}">${weekday}<br>${day}</span>`;
+  } else if (isLive) {
+    const elapsed = match.minute != null ? `${match.minute}'` : (status === 'PAUSED' ? 'HT' : 'LIVE');
+    leftColHtml = `<span class="card-left-label live-label" aria-label="Live ${elapsed}"><span class="live-dot-sm" aria-hidden="true"></span>${elapsed}</span>`;
+  } else if (isFinished) {
+    leftColHtml = `<span class="card-left-label ft-label" aria-label="Full Time">FT</span>`;
+  } else {
+    const matchTime = new Date(match.utcDate).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    leftColHtml = `<span class="card-left-label time-label" aria-label="Kickoff time ${matchTime}">${matchTime}</span>`;
+  }
+
+  // Winning / Losing team distinction
+  let homeWinnerClass = '';
+  let awayWinnerClass = '';
   let scoreHtml = '';
   let statusBadgeHtml = '';
   let mediaBtnHtml = '';
 
-  const matchTime = new Date(match.utcDate).toLocaleTimeString([], {
-    hour: '2-digit', minute: '2-digit'
-  });
+  const ft = score.fullTime || {};
 
   if (isFinished) {
-    const ft = score.fullTime || {};
     const homeGoals = (ft.home !== null && ft.home !== undefined) ? ft.home : '-';
     const awayGoals = (ft.away !== null && ft.away !== undefined) ? ft.away : '-';
+
+    if (ft.home !== null && ft.away !== null && ft.home !== undefined && ft.away !== undefined) {
+      if (ft.home > ft.away) {
+        homeWinnerClass = 'team-winner';
+        awayWinnerClass = 'team-loser';
+      } else if (ft.away > ft.home) {
+        homeWinnerClass = 'team-loser';
+        awayWinnerClass = 'team-winner';
+      }
+    }
+
     scoreHtml = `<span class="match-score">${homeGoals} – ${awayGoals}</span>`;
-    // FT shown in left column — no badge needed
-    // Direct link to exact HooFoot highlight video (null if not yet indexed)
+
     if (match.highlightsUrl) {
       mediaBtnHtml = `
-        <button class="btn-media highlights open-tab-link" data-url="${escapeHtml(match.highlightsUrl)}" title="Watch full highlights on HooFoot">
+        <button class="btn-media highlights open-tab-link" data-url="${escapeHtml(match.highlightsUrl)}" title="Watch full highlights on HooFoot" aria-label="Watch Highlights">
           🎬 Highlights
         </button>`;
     } else {
       mediaBtnHtml = `
-        <span class="btn-media highlights disabled" title="Highlights not yet available">
+        <span class="btn-media highlights disabled" title="Highlights not yet published" aria-label="Highlights Soon">
           ⏳ Soon
         </span>`;
     }
   } else if (isLive) {
-    const ft = score.fullTime || {};
     scoreHtml = `<span class="match-score">${ft.home ?? 0} – ${ft.away ?? 0}</span>`;
-    // LIVE/HT shown in left column — no badge needed
-    // Direct link to exact VIPBox live stream
     mediaBtnHtml = `
-      <button class="btn-media live open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Watch live stream on VIPBox">
-        <span class="live-dot-mini"></span> Live
+      <button class="btn-media live open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Watch live match stream on VIPBox" aria-label="Watch Live">
+        <span class="live-dot-mini" aria-hidden="true"></span> Live
       </button>`;
   } else {
-    // Scheduled / Timed — time is in left col, centre shows "vs" + countdown
+    // Scheduled / Timed
     scoreHtml = `<span class="match-vs">vs</span>`;
     statusBadgeHtml = `<span class="match-countdown" data-utc="${escapeHtml(match.utcDate)}">${getCountdown(match.utcDate)}</span>`;
-    // Direct link to VIPBox stream schedule / room
     mediaBtnHtml = `
-      <button class="btn-media stream open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Stream schedule on VIPBox">
+      <button class="btn-media stream open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Stream schedule on VIPBox" aria-label="Open Stream">
         📺 Stream
       </button>`;
   }
 
+  // Primary URL for clicking anywhere on the card
+  const primaryUrl = isFinished ? (match.highlightsUrl || 'https://hoofoot.net') : (match.liveStreamUrl || 'https://vipbox.ga/football-schedule');
+
+  // Check if teams are followed
+  const isHomeFollowed = followedTeams.some(t => t.id === homeTeam.id);
+  const isAwayFollowed = followedTeams.some(t => t.id === awayTeam.id);
+
+  const homeFullName = homeTeam.name || homeTeam.shortName || 'TBD';
+  const awayFullName = awayTeam.name || awayTeam.shortName || 'TBD';
+  const compName = match.competitionName || '';
+
   return `
-    <div class="match-card ${isLive ? 'is-live' : ''}">
+    <div class="match-card ${isLive ? 'is-live' : ''}" data-primary-url="${escapeHtml(primaryUrl)}" tabindex="0" role="link" aria-label="${escapeHtml(homeFullName)} versus ${escapeHtml(awayFullName)}">
       <div class="match-main-row">
         ${leftColHtml}
         <div class="match-teams-row">
-          <div class="match-team home">
-            <img src="${escapeHtml(homeTeam.crest || CREST_FALLBACK)}" alt="" />
-            <span class="team-name">${escapeHtml(homeTeam.shortName || homeTeam.name || 'TBD')}</span>
+          <div class="match-team home ${homeWinnerClass}">
+            <button class="team-star-btn ${isHomeFollowed ? 'active' : ''}" 
+                    data-team-id="${homeTeam.id}" 
+                    data-team-name="${escapeHtml(homeFullName)}" 
+                    data-team-crest="${escapeHtml(homeTeam.crest || '')}" 
+                    data-comp-name="${escapeHtml(compName)}"
+                    title="${isHomeFollowed ? 'Unfollow' : 'Follow'} ${escapeHtml(homeFullName)}"
+                    aria-label="${isHomeFollowed ? 'Unfollow' : 'Follow'} ${escapeHtml(homeFullName)}">
+              ${isHomeFollowed ? '★' : '☆'}
+            </button>
+            <img src="${escapeHtml(homeTeam.crest || CREST_FALLBACK)}" alt="" class="team-crest" loading="lazy" />
+            <span class="team-name" title="${escapeHtml(homeFullName)}">${escapeHtml(homeTeam.shortName || homeTeam.name || 'TBD')}</span>
           </div>
+
           <div class="match-center">
             ${scoreHtml}
             ${statusBadgeHtml}
           </div>
-          <div class="match-team away">
-            <span class="team-name">${escapeHtml(awayTeam.shortName || awayTeam.name || 'TBD')}</span>
-            <img src="${escapeHtml(awayTeam.crest || CREST_FALLBACK)}" alt="" />
+
+          <div class="match-team away ${awayWinnerClass}">
+            <span class="team-name" title="${escapeHtml(awayFullName)}">${escapeHtml(awayTeam.shortName || awayTeam.name || 'TBD')}</span>
+            <img src="${escapeHtml(awayTeam.crest || CREST_FALLBACK)}" alt="" class="team-crest" loading="lazy" />
+            <button class="team-star-btn ${isAwayFollowed ? 'active' : ''}" 
+                    data-team-id="${awayTeam.id}" 
+                    data-team-name="${escapeHtml(awayFullName)}" 
+                    data-team-crest="${escapeHtml(awayTeam.crest || '')}" 
+                    data-comp-name="${escapeHtml(compName)}"
+                    title="${isAwayFollowed ? 'Unfollow' : 'Follow'} ${escapeHtml(awayFullName)}"
+                    aria-label="${isAwayFollowed ? 'Unfollow' : 'Follow'} ${escapeHtml(awayFullName)}">
+              ${isAwayFollowed ? '★' : '☆'}
+            </button>
           </div>
         </div>
         <div class="match-action-row">
@@ -454,27 +662,6 @@ function renderMatchCard(match, dateRange) {
         </div>
       </div>
     </div>`;
-}
-
-// ── Match Day Helper ────────────────────
-function formatMatchDay(utcDate) {
-  const matchDate = new Date(utcDate);
-  const todayStr = formatLocalDate(new Date());
-  const matchDateStr = formatLocalDate(matchDate);
-
-  const yest = new Date();
-  yest.setDate(yest.getDate() - 1);
-  const yestStr = formatLocalDate(yest);
-
-  const tom = new Date();
-  tom.setDate(tom.getDate() + 1);
-  const tomStr = formatLocalDate(tom);
-
-  if (matchDateStr === todayStr) return 'Today';
-  if (matchDateStr === yestStr) return 'Yesterday';
-  if (matchDateStr === tomStr) return 'Tomorrow';
-
-  return matchDate.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
 // ── Countdown Calculation ───────────────
@@ -499,42 +686,61 @@ function getCountdown(utcDate) {
 // ── Dynamic Tick for Countdowns & Scores ─
 function tickTimersAndLiveScores() {
   // 1. Update countdown text on visible scheduled badges
-  $$('.match-status-badge.scheduled').forEach(badge => {
+  $$('.match-countdown').forEach(badge => {
     if (badge.dataset.utc) {
       badge.textContent = getCountdown(badge.dataset.utc);
     }
   });
 
-  // 2. If live games are active and popup is open, auto-refresh scores
+  // 2. Relative time update
+  updateRelativeTime();
+
+  // 3. Auto-refresh only when live matches are active
   const hasLive = currentMatches.some(m => m.status === 'IN_PLAY' || m.status === 'PAUSED');
   if (hasLive && currentTab === 'matches') {
-    loadMatches();
+    loadMatches(true);
+  }
+}
+
+// ── Relative Time Update ────────────────
+function updateRelativeTime() {
+  if (!lastFetchTimestamp) return;
+  const elapsedSecs = Math.floor((Date.now() - lastFetchTimestamp) / 1000);
+
+  if (elapsedSecs < 45) {
+    lastUpdated.textContent = 'Updated just now';
+  } else if (elapsedSecs < 3600) {
+    const mins = Math.floor(elapsedSecs / 60);
+    lastUpdated.textContent = `Updated ${mins}m ago`;
+  } else {
+    const timeStr = new Date(lastFetchTimestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    lastUpdated.textContent = `Updated ${timeStr}`;
   }
 }
 
 // ── Skeleton & Error UI ─────────────────
 function showMatchesSkeleton() {
   matchesList.innerHTML = `
-    <div class="skeleton-group">
+    <div class="skeleton-group" aria-hidden="true">
       <div class="skeleton skeleton-header"></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>
-      <div class="skeleton skeleton-header" style="margin-top:14px"></div>
+      <div class="skeleton skeleton-header" style="margin-top:10px"></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>
     </div>`;
 }
 
-function showMatchesError(message) {
+function showMatchesError(message, isOffline = false) {
   matchesList.innerHTML = `
     <div class="error-state">
-      <div class="error-icon">⚠️</div>
-      <h3>Something went wrong</h3>
+      <div class="error-icon" aria-hidden="true">${isOffline ? '📡' : '⚠️'}</div>
+      <h3>${isOffline ? 'Offline Mode' : 'Something went wrong'}</h3>
       <p>${escapeHtml(message)}</p>
       <button class="btn-retry" id="retryBtn">Try Again</button>
     </div>`;
   const retryBtn = $('#retryBtn');
-  if (retryBtn) retryBtn.addEventListener('click', loadMatches);
-  setStatus('Error loading matches');
+  if (retryBtn) retryBtn.addEventListener('click', () => loadMatches());
+  setStatus(isOffline ? 'Offline' : 'Error loading matches');
 }
 
 // ── Render Leagues Tab ──────────────────
@@ -544,19 +750,25 @@ function renderLeagues() {
     const league = allLeagues[code];
     const isSelected = selectedLeagues.includes(code);
     return `
-      <div class="league-card ${isSelected ? 'selected' : ''}" data-code="${escapeHtml(code)}">
-        <span class="league-emoji">${escapeHtml(league.emoji)}</span>
+      <div class="league-card ${isSelected ? 'selected' : ''}" data-code="${escapeHtml(code)}" role="checkbox" aria-checked="${isSelected}" tabindex="0">
+        <span class="league-emoji" aria-hidden="true">${escapeHtml(league.emoji)}</span>
         <div class="league-info">
           <div class="league-name">${escapeHtml(league.name)}</div>
           <div class="league-country">${escapeHtml(league.country)}</div>
         </div>
-        <div class="league-toggle"></div>
+        <div class="league-toggle" aria-hidden="true"></div>
       </div>`;
   }).join('');
 
   $$('.league-card').forEach(card => {
     card.addEventListener('click', () => {
       toggleLeague(card.dataset.code, card);
+    });
+    card.addEventListener('keydown', (e) => {
+      if (e.key === ' ' || e.key === 'Enter') {
+        e.preventDefault();
+        toggleLeague(card.dataset.code, card);
+      }
     });
   });
 }
@@ -567,9 +779,11 @@ function toggleLeague(code, card) {
     if (selectedLeagues.length === 1) return; // Keep at least one league
     selectedLeagues.splice(idx, 1);
     card.classList.remove('selected');
+    card.setAttribute('aria-checked', 'false');
   } else {
     selectedLeagues.push(code);
     card.classList.add('selected');
+    card.setAttribute('aria-checked', 'true');
   }
   chrome.storage.local.set({ selectedLeagues });
 }
@@ -586,13 +800,13 @@ function setupTeamSearch() {
         return;
       }
       searchTeams(query);
-    }, 350);
+    }, 320);
   });
 }
 
 function searchTeams(query) {
   searchResults.innerHTML = `
-    <div class="skeleton-group">
+    <div class="skeleton-group" aria-hidden="true">
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div></div>
     </div>`;
@@ -614,7 +828,7 @@ function renderSearchResults(teams) {
   if (!teams || teams.length === 0) {
     searchResults.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">🔍</div>
+        <div class="empty-icon" aria-hidden="true">🔍</div>
         <h3>No teams found</h3>
         <p>Try a different search query</p>
       </div>`;
@@ -630,12 +844,12 @@ function renderSearchResults(teams) {
     const isFollowing = followedIds.has(team.id);
     return `
       <div class="team-card" data-team-id="${team.id}">
-        <img src="${escapeHtml(team.crest || CREST_FALLBACK)}" alt="" />
+        <img src="${escapeHtml(team.crest || CREST_FALLBACK)}" alt="" loading="lazy" />
         <div class="team-info">
-          <div class="team-name">${escapeHtml(team.name)}</div>
+          <div class="team-name" title="${escapeHtml(team.name)}">${escapeHtml(team.name)}</div>
           <div class="team-league">${escapeHtml(team.competitionName || '')}</div>
         </div>
-        <button class="team-follow-btn ${isFollowing ? 'following' : ''}" data-team-id="${team.id}">
+        <button class="team-follow-btn ${isFollowing ? 'following' : ''}" data-team-id="${team.id}" aria-label="${isFollowing ? 'Unfollow' : 'Follow'} ${escapeHtml(team.name)}">
           ${isFollowing ? '✓ Following' : '+ Follow'}
         </button>
       </div>`;
@@ -654,10 +868,10 @@ function renderSearchResults(teams) {
 function renderFollowedTeams() {
   if (followedTeams.length === 0) {
     followedTeamsEl.innerHTML = `
-      <div class="empty-state" style="padding: 20px">
-        <div class="empty-icon">💚</div>
+      <div class="empty-state" style="padding: 24px 16px">
+        <div class="empty-icon" aria-hidden="true">⭐</div>
         <h3>No Teams Followed</h3>
-        <p>Search and follow your favorite clubs<br>to quickly filter their fixtures</p>
+        <p>Search and follow your favorite clubs<br>to quickly filter their fixtures.</p>
       </div>`;
     return;
   }
@@ -668,12 +882,12 @@ function renderFollowedTeams() {
     <div class="followed-label">Your Teams (${followedTeams.length})</div>
     ${followedTeams.map(team => `
       <div class="team-card" data-team-id="${team.id}">
-        <img src="${escapeHtml(team.crest || CREST_FALLBACK)}" alt="" />
+        <img src="${escapeHtml(team.crest || CREST_FALLBACK)}" alt="" loading="lazy" />
         <div class="team-info">
-          <div class="team-name">${escapeHtml(team.name)}</div>
+          <div class="team-name" title="${escapeHtml(team.name)}">${escapeHtml(team.name)}</div>
           <div class="team-league">${escapeHtml(team.competitionName || '')}</div>
         </div>
-        <button class="team-follow-btn following" data-team-id="${team.id}">
+        <button class="team-follow-btn following" data-team-id="${team.id}" aria-label="Unfollow ${escapeHtml(team.name)}">
           ✓ Following
         </button>
       </div>
@@ -689,6 +903,12 @@ function renderFollowedTeams() {
   });
 }
 
+// ── Instant Team Follow / Unfollow (from card star or search) ─
+function toggleFollowTeamSimple(team) {
+  if (!team || !team.id) return;
+  toggleFollowTeam(team);
+}
+
 function toggleFollowTeam(team, btnEl) {
   const idx = followedTeams.findIndex(t => t.id === team.id);
   if (idx > -1) {
@@ -699,23 +919,38 @@ function toggleFollowTeam(team, btnEl) {
     }
   } else {
     followedTeams.push(team);
+    teamsCache.set(team.id, team);
     if (btnEl) {
       btnEl.classList.add('following');
       btnEl.textContent = '✓ Following';
     }
   }
   chrome.storage.local.set({ followedTeams });
+
+  // Update star buttons on visible match cards immediately
+  const isNowFollowed = followedTeams.some(t => t.id === team.id);
+  $$(`.team-star-btn[data-team-id="${team.id}"]`).forEach(star => {
+    star.classList.toggle('active', isNowFollowed);
+    star.textContent = isNowFollowed ? '★' : '☆';
+    star.title = `${isNowFollowed ? 'Unfollow' : 'Follow'} ${team.name || ''}`;
+  });
+
   renderFollowedTeams();
-  applyFiltersAndRender();
+
+  // If in 'followed' subfilter, re-filter view
+  if (currentSubFilter === 'followed') {
+    applyFiltersAndRender();
+  }
 }
 
 // ── Refresh & Settings ──────────────────
 function setupRefresh() {
   refreshBtn.addEventListener('click', () => {
+    if (refreshBtn.classList.contains('spinning')) return;
     refreshBtn.classList.add('spinning');
     chrome.runtime.sendMessage({ type: 'REFRESH' }, () => {
       loadMatches();
-      setTimeout(() => refreshBtn.classList.remove('spinning'), 700);
+      setTimeout(() => refreshBtn.classList.remove('spinning'), 750);
     });
   });
 }
@@ -729,9 +964,4 @@ function setupSettings() {
 // ── Status Bar ──────────────────────────
 function setStatus(text) {
   statusText.textContent = text;
-}
-
-function setLastUpdated() {
-  const now = new Date();
-  lastUpdated.textContent = `Updated ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
