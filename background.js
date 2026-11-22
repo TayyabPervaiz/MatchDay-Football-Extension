@@ -169,16 +169,17 @@ async function getHoofootLeagueIndex(leagueSlug) {
     }
     const html = await res.text();
     const articles = [];
-    // Match all article hrefs within the league section
-    const hrefRegex = new RegExp(`href="(https?://hoofoot\\.net/full-matches/${leagueSlug}/[^"]+)"`, 'g');
+    // HooFoot uses RELATIVE hrefs: /full-matches/{league}/slug/
+    const hrefRegex = /href="(\/full-matches\/[^"]+)"/g;
     let m;
     while ((m = hrefRegex.exec(html)) !== null) {
       const href = m[1];
-      // Extract just the slug portion between the league path and trailing slash
-      const slugMatch = href.match(new RegExp(`/full-matches/${leagueSlug}/([^/]+)/?$`));
-      if (slugMatch) {
-        articles.push({ url: href, slug: slugMatch[1] });
-      }
+      const prefix = `/full-matches/${leagueSlug}/`;
+      if (!href.startsWith(prefix)) continue;
+      const after = href.slice(prefix.length).replace(/\/$/, '');
+      // Skip pagination / category pages (empty or nested)
+      if (!after || after.includes('/')) continue;
+      articles.push({ url: `https://hoofoot.net${href}`, slug: after });
     }
     // Deduplicate
     const seen = new Set();
