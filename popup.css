@@ -166,7 +166,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px 8px;
+  padding: 8px 14px 6px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 .header-left { display: flex; align-items: center; gap: 8px; }
@@ -244,10 +244,10 @@ body {
 .date-filter {
   flex-shrink: 0;
   display: flex;
-  gap: 6px;
-  padding: 8px 14px 6px;
+  gap: 5px;
+  padding: 5px 12px 4px;
   transition: opacity 0.2s, max-height 0.25s;
-  max-height: 48px;
+  max-height: 40px;
   overflow: hidden;
   background: rgba(0, 0, 0, 0.1);
 }
@@ -259,12 +259,12 @@ body {
 }
 .date-btn {
   flex: 1;
-  padding: 5px 8px;
+  padding: 4px 6px;
   background: var(--bg-card);
   border: 1px solid transparent;
-  border-radius: 16px;
+  border-radius: 14px;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
@@ -293,7 +293,7 @@ body {
   position: absolute;
   inset: 0;
   overflow-y: auto;
-  padding: 10px 14px 14px;
+  padding: 7px 10px 10px;
   opacity: 0;
   visibility: hidden;
   transform: translateY(6px);
@@ -309,8 +309,8 @@ body {
 .filter-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
+  gap: 5px;
+  margin-bottom: 6px;
 }
 .filter-chip {
   padding: 4px 10px;
@@ -357,15 +357,15 @@ body {
 
 /* ── Competition Group Headers ───────── */
 .match-competition-group {
-  margin-bottom: 14px;
+  margin-bottom: 8px;
   animation: slideUp 0.25s ease;
 }
 .competition-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 5px 8px;
-  margin-bottom: 6px;
+  padding: 3px 8px;
+  margin-bottom: 3px;
   background: rgba(255, 255, 255, 0.02);
   border-radius: var(--radius-sm);
   border-left: 3px solid var(--accent-2);
@@ -391,8 +391,8 @@ body {
   background: var(--bg-card);
   border: 1px solid var(--bg-glass-border);
   border-radius: var(--radius-md);
-  padding: 10px 12px;
-  margin-bottom: 7px;
+  padding: 6px 10px;
+  margin-bottom: 4px;
   transition: all 0.2s;
   position: relative;
 }
@@ -406,25 +406,35 @@ body {
   background: rgba(255, 68, 68, 0.03);
 }
 
-.match-day-header {
+/* .match-day-header removed — day tag is now inline in .match-main-row */
+.match-main-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 4px;
+  gap: 6px;
 }
 .match-day-tag {
-  font-size: 9.5px;
+  font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 0.5px;
   color: var(--text-muted);
+  min-width: 32px;
+  width: 32px;
+  flex-shrink: 0;
+  line-height: 1;
+  opacity: 0.75;
+  text-align: center;
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
 }
 
 .match-teams-row {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
+  min-width: 0;
 }
 .match-team {
   display: flex;
@@ -438,12 +448,12 @@ body {
   text-align: right;
 }
 .match-team img {
-  width: 22px; height: 22px;
+  width: 18px; height: 18px;
   object-fit: contain;
   flex-shrink: 0;
 }
 .match-team .team-name {
-  font-size: 12.5px;
+  font-size: 11.5px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -454,13 +464,13 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 64px;
+  min-width: 56px;
   flex-shrink: 0;
 }
 .match-score {
-  font-size: 17px;
+  font-size: 14px;
   font-weight: 800;
-  letter-spacing: 1.5px;
+  letter-spacing: 1px;
   color: var(--text-primary);
   line-height: 1.2;
 }
@@ -492,29 +502,29 @@ body {
   color: var(--text-muted);
 }
 
-/* ── Match Action Bar (VIPBox & HooFoot Direct Links) ── */
+/* ── Match Action Row — inline, no separator ── */
 .match-action-row {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  margin-top: 8px;
-  padding-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
+  margin-left: 6px;
 }
 
 .btn-media {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 3.5px 10px;
-  border-radius: 12px;
-  font-size: 10.5px;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  font-size: 10px;
   font-weight: 700;
   cursor: pointer;
   border: 1px solid transparent;
   transition: all 0.2s;
   text-decoration: none;
   line-height: 1;
+  white-space: nowrap;
 }
 
 /* 1. Live Match: VIPBox Direct Stream */
@@ -836,11 +846,11 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 5px 14px;
+  padding: 3px 12px;
   font-size: 10px;
   color: var(--text-muted);
   border-top: 1px solid rgba(255, 255, 255, 0.05);
-  height: 26px;
+  height: 22px;
   background: rgba(0, 0, 0, 0.15);
 }
 

@@ -388,12 +388,12 @@ function renderMatchCard(match) {
     if (match.highlightsUrl) {
       mediaBtnHtml = `
         <button class="btn-media highlights open-tab-link" data-url="${escapeHtml(match.highlightsUrl)}" title="Watch full highlights on HooFoot">
-          🎬 Full Highlights
+          🎬 Highlights
         </button>`;
     } else {
       mediaBtnHtml = `
         <span class="btn-media highlights disabled" title="Highlights not yet available">
-          ⏳ Highlights Soon
+          ⏳ Soon
         </span>`;
     }
   } else if (isLive) {
@@ -403,7 +403,7 @@ function renderMatchCard(match) {
     // Direct link to exact VIPBox live stream
     mediaBtnHtml = `
       <button class="btn-media live open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Watch live stream on VIPBox">
-        <span class="live-dot-mini"></span> ▶ Watch Live
+        <span class="live-dot-mini"></span> Live
       </button>`;
   } else {
     // Scheduled / Timed
@@ -418,25 +418,25 @@ function renderMatchCard(match) {
 
   return `
     <div class="match-card ${isLive ? 'is-live' : ''}">
-      <div class="match-day-header">
+      <div class="match-main-row">
         <span class="match-day-tag">${escapeHtml(dayTag)}</span>
-      </div>
-      <div class="match-teams-row">
-        <div class="match-team home">
-          <img src="${escapeHtml(homeTeam.crest || CREST_FALLBACK)}" alt="" />
-          <span class="team-name">${escapeHtml(homeTeam.shortName || homeTeam.name || 'TBD')}</span>
+        <div class="match-teams-row">
+          <div class="match-team home">
+            <img src="${escapeHtml(homeTeam.crest || CREST_FALLBACK)}" alt="" />
+            <span class="team-name">${escapeHtml(homeTeam.shortName || homeTeam.name || 'TBD')}</span>
+          </div>
+          <div class="match-center">
+            ${scoreHtml}
+            ${statusBadgeHtml}
+          </div>
+          <div class="match-team away">
+            <span class="team-name">${escapeHtml(awayTeam.shortName || awayTeam.name || 'TBD')}</span>
+            <img src="${escapeHtml(awayTeam.crest || CREST_FALLBACK)}" alt="" />
+          </div>
         </div>
-        <div class="match-center">
-          ${scoreHtml}
-          ${statusBadgeHtml}
+        <div class="match-action-row">
+          ${mediaBtnHtml}
         </div>
-        <div class="match-team away">
-          <span class="team-name">${escapeHtml(awayTeam.shortName || awayTeam.name || 'TBD')}</span>
-          <img src="${escapeHtml(awayTeam.crest || CREST_FALLBACK)}" alt="" />
-        </div>
-      </div>
-      <div class="match-action-row">
-        ${mediaBtnHtml}
       </div>
     </div>`;
 }
