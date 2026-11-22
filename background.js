@@ -3,22 +3,89 @@
    ═══════════════════════════════════════════ */
 
 const API_BASE = 'https://api.football-data.org/v4';
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const MATCHES_CACHE_TTL = 3 * 60 * 1000;       // 3 minutes
+const TEAMS_CACHE_TTL = 14 * 24 * 60 * 60 * 1000; // 14 days
+const HOOFOOT_INDEX_TTL = 30 * 60 * 1000;       // 30 minutes
 
 const LEAGUES = {
-  PL:  { name: 'Premier League',    country: 'England',      emoji: '🏴󠁧󠁢󠁥󠁮󠁧󠁿' },
-  PD:  { name: 'La Liga',           country: 'Spain',        emoji: '🇪🇸' },
-  BL1: { name: 'Bundesliga',        country: 'Germany',      emoji: '🇩🇪' },
-  SA:  { name: 'Serie A',           country: 'Italy',        emoji: '🇮🇹' },
-  FL1: { name: 'Ligue 1',           country: 'France',       emoji: '🇫🇷' },
-  CL:  { name: 'Champions League',  country: 'Europe',       emoji: '🏆' },
-  ELC: { name: 'Championship',      country: 'England',      emoji: '🏴󠁧󠁢󠁥󠁮󠁧󠁿' },
-  PPL: { name: 'Primeira Liga',     country: 'Portugal',     emoji: '🇵🇹' },
-  DED: { name: 'Eredivisie',        country: 'Netherlands',  emoji: '🇳🇱' },
-  BSA: { name: 'Série A',           country: 'Brazil',       emoji: '🇧🇷' },
-  EC:  { name: 'European Championship', country: 'Europe',   emoji: '🇪🇺' },
-  WC:  { name: 'FIFA World Cup',    country: 'International', emoji: '🌍' }
+  CL:  { name: 'Champions League',       country: 'Europe',        emoji: '🏆', priority: 1,  hoofootSlug: 'champions-league' },
+  PL:  { name: 'Premier League',         country: 'England',       emoji: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', priority: 2,  hoofootSlug: 'premier-league' },
+  PD:  { name: 'La Liga',                country: 'Spain',         emoji: '🇪🇸', priority: 3,  hoofootSlug: 'la-liga' },
+  BL1: { name: 'Bundesliga',             country: 'Germany',       emoji: '🇩🇪', priority: 4,  hoofootSlug: 'bundesliga' },
+  SA:  { name: 'Serie A',                country: 'Italy',         emoji: '🇮🇹', priority: 5,  hoofootSlug: 'serie-a' },
+  FL1: { name: 'Ligue 1',                country: 'France',        emoji: '🇫🇷', priority: 6,  hoofootSlug: 'ligue-1' },
+  ELC: { name: 'Championship',           country: 'England',       emoji: '🏴󠁧󠁢󠁥󠁮󠁧󠁿', priority: 7,  hoofootSlug: 'championship' },
+  PPL: { name: 'Primeira Liga',          country: 'Portugal',      emoji: '🇵🇹', priority: 8,  hoofootSlug: 'primeira-liga' },
+  DED: { name: 'Eredivisie',             country: 'Netherlands',   emoji: '🇳🇱', priority: 9,  hoofootSlug: 'eredivisie' },
+  BSA: { name: 'Série A',                country: 'Brazil',        emoji: '🇧🇷', priority: 10, hoofootSlug: 'pro-league' },
+  EC:  { name: 'European Championship',  country: 'Europe',        emoji: '🇪🇺', priority: 11, hoofootSlug: 'euro-cup' },
+  WC:  { name: 'FIFA World Cup',         country: 'International', emoji: '🌍', priority: 12, hoofootSlug: 'fifa-world-cup-2026' }
 };
+
+// ── Local Date Helper ───────────────────
+function formatLocalDate(d) {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// ── Sliding UTC Window for Local Timezones ──
+function getUtcRangeForLocalDate(dateFrom, dateTo) {
+  const dFrom = new Date(dateFrom + 'T00:00:00');
+  dFrom.setDate(dFrom.getDate() - 1);
+  const dTo = new Date(dateTo + 'T00:00:00');
+  dTo.setDate(dTo.getDate() + 1);
+
+  // Football-data API allows maximum 10 days difference
+  const diffDays = Math.round((dTo - dFrom) / (1000 * 60 * 60 * 24));
+  if (diffDays > 10) {
+    dTo.setTime(dFrom.getTime() + 9 * 24 * 60 * 60 * 1000);
+  }
+
+  return {
+    apiFrom: formatLocalDate(dFrom),
+    apiTo: formatLocalDate(dTo)
+  };
+}
+
+// ── Slugify Helper (VIPBox / General ASCII normalise) ──────────────────────
+function slugify(text) {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // diacritics -> base char (é->e)
+    .replace(/['']/g, '')                               // remove apostrophes
+    .replace(/\b(fc|cf|sc|afc|bsc|sv|ac|rc|sk|cd|as|ss|vfb|tsv|rcd|ud|sd)\b/gi, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// ── Normalize team name to key tokens for fuzzy HooFoot matching ──────────
+function teamTokens(name) {
+  if (!name) return [];
+  return name
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // strip diacritics -> base chars
+    .replace(/['']/g, '')
+    // Strip common club affixes & noise words that HooFoot slugs often omit
+    .replace(/\b(fc|cf|sc|afc|bsc|sv|ac|rc|sk|cd|rcd|ud|sd|club|de|la|le|les|el|los|las)\b/gi, '')
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(t => t.length >= 3);
+}
+
+// ── Score how well a HooFoot slug matches a home+away pair ───────────────
+function slugMatchScore(slug, homeToks, awayToks) {
+  // Normalise the slug itself to ASCII base chars before scoring
+  const s = slug.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const homeHits = homeToks.filter(t => s.includes(t)).length;
+  const awayHits = awayToks.filter(t => s.includes(t)).length;
+  if (!homeToks.length || !awayToks.length) return 0;
+  return (homeHits / homeToks.length) + (awayHits / awayToks.length);
+}
 
 // ── API Fetch Helper ────────────────────
 async function apiFetch(endpoint, params = {}) {
@@ -26,7 +93,11 @@ async function apiFetch(endpoint, params = {}) {
   if (!apiKey) throw new Error('NO_API_KEY');
 
   const url = new URL(`${API_BASE}${endpoint}`);
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && v !== '') {
+      url.searchParams.set(k, v);
+    }
+  });
 
   const response = await fetch(url.toString(), {
     headers: { 'X-Auth-Token': apiKey }
@@ -42,11 +113,11 @@ async function apiFetch(endpoint, params = {}) {
 }
 
 // ── Cache Helper ────────────────────────
-async function getCached(key) {
+async function getCached(key, ttl = MATCHES_CACHE_TTL) {
   const data = await chrome.storage.local.get(key);
   if (!data[key]) return null;
   const { value, timestamp } = data[key];
-  if (Date.now() - timestamp > CACHE_TTL) return null;
+  if (Date.now() - timestamp > ttl) return null;
   return value;
 }
 
@@ -54,50 +125,256 @@ async function setCache(key, value) {
   await chrome.storage.local.set({ [key]: { value, timestamp: Date.now() } });
 }
 
-// ── Fetch Matches ───────────────────────
-async function fetchMatches(dateFrom, dateTo, competitions) {
-  const cacheKey = `matches_${dateFrom}_${dateTo}_${competitions.join(',')}`;
-  const cached = await getCached(cacheKey);
+// ── Sync Live Schedule from VIPBox ──────
+async function getVipboxSchedule() {
+  const cacheKey = 'vipbox_schedule';
+  const cached = await getCached(cacheKey, 10 * 60 * 1000); // 10 min cache
   if (cached) return cached;
 
-  const allMatches = [];
-
-  // Fetch per competition (free tier doesn't allow multiple competition filter on /matches)
-  for (const code of competitions) {
-    try {
-      const data = await apiFetch(`/competitions/${code}/matches`, {
-        dateFrom,
-        dateTo,
-        status: 'SCHEDULED,TIMED,IN_PLAY,PAUSED,FINISHED'
+  try {
+    const res = await fetch('https://vipbox.ga/football-schedule', { cache: 'no-store' });
+    if (!res.ok) return [];
+    const html = await res.text();
+    const list = [];
+    const regex = /href="(\/onair\/football\/([^"]+))"/g;
+    let m;
+    while ((m = regex.exec(html)) !== null) {
+      list.push({
+        url: `https://vipbox.ga${m[1]}`,
+        slug: m[2]
       });
-      if (data.matches) {
-        allMatches.push(...data.matches.map(m => ({
-          ...m,
-          competitionCode: code,
-          competitionName: LEAGUES[code]?.name || m.competition?.name,
-          competitionEmoji: LEAGUES[code]?.emoji || '⚽'
-        })));
+    }
+    await setCache(cacheKey, list);
+    return list;
+  } catch (e) {
+    console.warn('VIPBox live schedule fetch failed:', e.message);
+    return [];
+  }
+}
+
+// ── Fetch & Cache HooFoot League Index (article hrefs) ───────────────────
+async function getHoofootLeagueIndex(leagueSlug) {
+  const cacheKey = `hoofoot_index_${leagueSlug}`;
+  const cached = await getCached(cacheKey, HOOFOOT_INDEX_TTL);
+  if (cached) return cached;
+
+  try {
+    const res = await fetch(`https://hoofoot.net/full-matches/${leagueSlug}/`, {
+      cache: 'no-store',
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    if (!res.ok) {
+      console.warn(`HooFoot index fetch failed for ${leagueSlug}: HTTP ${res.status}`);
+      return [];
+    }
+    const html = await res.text();
+    const articles = [];
+    // Match all article hrefs within the league section
+    const hrefRegex = new RegExp(`href="(https?://hoofoot\\.net/full-matches/${leagueSlug}/[^"]+)"`, 'g');
+    let m;
+    while ((m = hrefRegex.exec(html)) !== null) {
+      const href = m[1];
+      // Extract just the slug portion between the league path and trailing slash
+      const slugMatch = href.match(new RegExp(`/full-matches/${leagueSlug}/([^/]+)/?$`));
+      if (slugMatch) {
+        articles.push({ url: href, slug: slugMatch[1] });
       }
-    } catch (e) {
-      // If rate limited on one, we still get the rest 
-      if (e.message === 'RATE_LIMIT') {
-        // Wait a bit and skip this competition
-        await new Promise(r => setTimeout(r, 6500));
+    }
+    // Deduplicate
+    const seen = new Set();
+    const unique = articles.filter(a => {
+      if (seen.has(a.url)) return false;
+      seen.add(a.url);
+      return true;
+    });
+    if (unique.length > 0) {
+      await setCache(cacheKey, unique);
+    }
+    return unique;
+  } catch (e) {
+    console.warn(`HooFoot index fetch error for ${leagueSlug}:`, e.message);
+    return [];
+  }
+}
+
+// ── Find Best HooFoot Highlights URL via Fuzzy Slug Match ────────────────
+async function findHoofootUrl(homeTeam, awayTeam, leagueSlug, matchDate) {
+  const months = ['january','february','march','april','may','june',
+                  'july','august','september','october','november','december'];
+  const d = new Date(matchDate);
+  const monthName = months[d.getUTCMonth()];
+  const dayStr   = String(d.getUTCDate()).padStart(2, '0');
+  const yearStr  = d.getUTCFullYear();
+
+  // Tokens extracted from team names (ASCII normalised, noise words stripped)
+  const homeToks = teamTokens(homeTeam);
+  const awayToks = teamTokens(awayTeam);
+
+  // 1. Try live index from HooFoot league page
+  const index = await getHoofootLeagueIndex(leagueSlug);
+  if (index.length > 0) {
+    // Filter to articles plausibly dated within ±2 days of the match
+    const dateHints = [monthName, String(d.getUTCDate()), yearStr.toString()];
+    const dated = index.filter(a =>
+      dateHints.some(hint => a.slug.includes(hint)) ||
+      // Allow undated slugs that strongly match team names
+      slugMatchScore(a.slug, homeToks, awayToks) >= 1.5
+    );
+
+    const pool = dated.length > 0 ? dated : index;
+    let best = null;
+    let bestScore = 0;
+    for (const article of pool) {
+      const score = slugMatchScore(article.slug, homeToks, awayToks);
+      if (score > bestScore) {
+        bestScore = score;
+        best = article;
       }
-      console.warn(`Failed to fetch ${code}:`, e.message);
+    }
+
+    // Threshold: at least one token from EACH team must match (score >= ~0.5 each side)
+    if (best && bestScore >= 1.0) {
+      return best.url;
     }
   }
 
-  // Sort by date
-  allMatches.sort((a, b) => new Date(a.utcDate) - new Date(b.utcDate));
-  await setCache(cacheKey, allMatches);
-  return allMatches;
+  // 2. Fallback: construct URL with our standard slugify (works for ASCII-only names)
+  const homeSlug = slugify(homeTeam);
+  const awaySlug = slugify(awayTeam);
+  return `https://hoofoot.net/full-matches/${leagueSlug}/${homeSlug}-vs-${awaySlug}-highlights-${monthName}-${dayStr}-${yearStr}/`;
 }
 
-// ── Fetch Teams for a Competition ───────
+// ── Enrich Match with Media Links & Slugs ─────────────────────────────────
+async function enrichMatch(m, vipSchedule = []) {
+  const code = m.competition?.code;
+  const leagueMeta = LEAGUES[code] || {};
+  const homeTeam = m.homeTeam || {};
+  const awayTeam = m.awayTeam || {};
+
+  const homeName = homeTeam.shortName || homeTeam.name || '';
+  const awayName = awayTeam.shortName || awayTeam.name || '';
+  const homeSlug = slugify(homeName);
+  const awaySlug = slugify(awayName);
+
+  // 1. VIPBox Direct Match Stream URL (fuzzy match from schedule)
+  let liveStreamUrl = `https://vipbox.ga/onair/football/${homeSlug}-vs-${awaySlug}`;
+  if (vipSchedule && vipSchedule.length > 0) {
+    const homeToks = teamTokens(homeName);
+    const awayToks = teamTokens(awayName);
+    let best = null;
+    let bestScore = 0;
+    for (const v of vipSchedule) {
+      const score = slugMatchScore(v.slug, homeToks, awayToks);
+      if (score > bestScore) {
+        bestScore = score;
+        best = v;
+      }
+    }
+    if (best && bestScore >= 1.0) {
+      liveStreamUrl = best.url;
+    }
+  }
+
+  // 2. HooFoot Full Match Highlights URL
+  const leagueSlug = leagueMeta.hoofootSlug || 'premier-league';
+  const isFinished = (m.status === 'FINISHED');
+  let highlightsUrl = null;
+
+  if (isFinished) {
+    highlightsUrl = await findHoofootUrl(homeName, awayName, leagueSlug, m.utcDate);
+  }
+
+  return {
+    ...m,
+    competitionCode: code,
+    competitionName: leagueMeta.name || m.competition?.name || 'Unknown League',
+    competitionEmoji: leagueMeta.emoji || '⚽',
+    liveStreamUrl,
+    highlightsUrl,
+    homeSlug,
+    awaySlug
+  };
+}
+
+// ── Fetch Matches (Competition Queries for Accurate Scores) ─
+async function fetchMatches(dateFrom, dateTo, competitions = []) {
+  const comps = (competitions && competitions.length > 0)
+    ? competitions
+    : ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'];
+
+  const compKey = comps.slice().sort().join(',');
+  const cacheKey = `matches_${dateFrom}_${dateTo}_${compKey}`;
+  const cached = await getCached(cacheKey);
+  if (cached) return cached;
+
+  // Expand query window by ±1 day to capture UTC matches matching local time
+  const { apiFrom, apiTo } = getUtcRangeForLocalDate(dateFrom, dateTo);
+
+  // Fetch from /competitions/{code}/matches to ensure accurate FINISHED statuses & full scores
+  const results = await Promise.allSettled(
+    comps.map(code =>
+      apiFetch(`/competitions/${code}/matches`, {
+        dateFrom: apiFrom,
+        dateTo: apiTo
+      })
+    )
+  );
+
+  let rawMatches = [];
+  results.forEach((res, i) => {
+    if (res.status === 'fulfilled' && res.value?.matches) {
+      rawMatches.push(...res.value.matches);
+    } else {
+      console.warn(`Failed to fetch matches for ${comps[i]}:`, res.reason?.message);
+    }
+  });
+
+  // Filter 1: Requested competitions
+  let filtered = rawMatches.filter(m => comps.includes(m.competition?.code));
+
+  // Filter 2: Local Timezone Date Matching
+  const todayStr = formatLocalDate(new Date());
+  const includesToday = (dateFrom <= todayStr && todayStr <= dateTo);
+
+  filtered = filtered.filter(m => {
+    const localMatchDate = formatLocalDate(new Date(m.utcDate));
+    const isWithinLocalRange = (localMatchDate >= dateFrom && localMatchDate <= dateTo);
+    const isLiveNow = (m.status === 'IN_PLAY' || m.status === 'PAUSED');
+    return isWithinLocalRange || (includesToday && isLiveNow);
+  });
+
+  // Enrich all matches with VIPBox & HooFoot URLs
+  const vipSchedule = await getVipboxSchedule();
+  const enriched = await Promise.all(filtered.map(m => enrichMatch(m, vipSchedule)));
+
+  // Sort by FotMob sequencing:
+  // 1. Hoist LIVE matches (IN_PLAY, PAUSED) to top
+  // 2. Sort by League Priority tier
+  // 3. Chronological by kickoff time
+  enriched.sort((a, b) => {
+    const aLive = (a.status === 'IN_PLAY' || a.status === 'PAUSED') ? 0 : 1;
+    const bLive = (b.status === 'IN_PLAY' || b.status === 'PAUSED') ? 0 : 1;
+    if (aLive !== bLive) return aLive - bLive;
+
+    const prioA = LEAGUES[a.competitionCode]?.priority || 99;
+    const prioB = LEAGUES[b.competitionCode]?.priority || 99;
+    if (prioA !== prioB) return prioA - prioB;
+
+    return new Date(a.utcDate) - new Date(b.utcDate);
+  });
+
+  // Only cache non-empty results to avoid locking users out
+  if (enriched.length > 0) {
+    await setCache(cacheKey, enriched);
+  }
+
+  return enriched;
+}
+
+// ── Fetch Teams for a Competition (Long-term 14d cache) ─
 async function fetchTeams(competitionCode) {
   const cacheKey = `teams_${competitionCode}`;
-  const cached = await getCached(cacheKey);
+  const cached = await getCached(cacheKey, TEAMS_CACHE_TTL);
   if (cached) return cached;
 
   try {
@@ -105,7 +382,7 @@ async function fetchTeams(competitionCode) {
     const teams = (data.teams || []).map(t => ({
       id: t.id,
       name: t.name,
-      shortName: t.shortName || t.tla,
+      shortName: t.shortName || t.tla || t.name,
       tla: t.tla,
       crest: t.crest,
       competitionCode,
@@ -135,16 +412,28 @@ async function searchTeams(query, selectedLeagues) {
   );
 }
 
-// ── Update Badge ────────────────────────
+// ── Update Toolbar Badge ────────────────
 async function updateBadge() {
   try {
-    const { selectedLeagues = ['PL', 'CL'] } = await chrome.storage.local.get('selectedLeagues');
-    const today = new Date().toISOString().slice(0, 10);
+    const { apiKey } = await chrome.storage.local.get('apiKey');
+    if (!apiKey) {
+      chrome.action.setBadgeText({ text: '' });
+      return;
+    }
+
+    const { selectedLeagues = ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'] } = await chrome.storage.local.get('selectedLeagues');
+    const today = formatLocalDate(new Date());
     const matches = await fetchMatches(today, today, selectedLeagues);
-    const count = matches.length;
-    
-    chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
-    chrome.action.setBadgeBackgroundColor({ color: '#00e676' });
+
+    const liveMatches = matches.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED');
+    if (liveMatches.length > 0) {
+      chrome.action.setBadgeText({ text: String(liveMatches.length) });
+      chrome.action.setBadgeBackgroundColor({ color: '#ff4444' }); // Red for live
+    } else {
+      const scheduledCount = matches.filter(m => m.status === 'SCHEDULED' || m.status === 'TIMED').length;
+      chrome.action.setBadgeText({ text: scheduledCount > 0 ? String(scheduledCount) : '' });
+      chrome.action.setBadgeBackgroundColor({ color: '#00e676' }); // Green for upcoming
+    }
   } catch (e) {
     console.warn('Badge update failed:', e.message);
   }
@@ -175,12 +464,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         case 'REFRESH': {
-          // Clear match caches
           const storage = await chrome.storage.local.get(null);
-          const matchKeys = Object.keys(storage).filter(k => k.startsWith('matches_') || k.startsWith('teams_'));
+          const matchKeys = Object.keys(storage).filter(k =>
+            k.startsWith('matches_') || k === 'vipbox_schedule' || k.startsWith('hoofoot_index_')
+          );
           await chrome.storage.local.remove(matchKeys);
           await updateBadge();
           sendResponse({ success: true });
+          break;
+        }
+        case 'TEST_API_KEY': {
+          const testRes = await fetch(`${API_BASE}/competitions/PL`, {
+            headers: { 'X-Auth-Token': msg.apiKey }
+          });
+          if (testRes.ok) {
+            sendResponse({ success: true });
+          } else {
+            sendResponse({ success: false, status: testRes.status });
+          }
           break;
         }
         default:
@@ -193,21 +494,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // Keep message channel open for async response
 });
 
-// ── Alarms ──────────────────────────────
-chrome.alarms.create('refreshMatches', { periodInMinutes: 5 });
+// ── Alarms & Lifecycle ──────────────────
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'refreshMatches') {
     updateBadge();
   }
 });
 
-// ── On Install ──────────────────────────
-chrome.runtime.onInstalled.addListener(() => {
-  // Set default selected leagues
-  chrome.storage.local.get('selectedLeagues', ({ selectedLeagues }) => {
-    if (!selectedLeagues) {
-      chrome.storage.local.set({ selectedLeagues: ['PL', 'CL'] });
+chrome.runtime.onInstalled.addListener(async () => {
+  // Clear any stale match + HooFoot index cache on reload
+  const storage = await chrome.storage.local.get(null);
+  const staleKeys = Object.keys(storage).filter(k =>
+    k.startsWith('matches_') || k.startsWith('hoofoot_index_')
+  );
+  if (staleKeys.length > 0) {
+    await chrome.storage.local.remove(staleKeys);
+  }
+
+  const { selectedLeagues } = await chrome.storage.local.get('selectedLeagues');
+  if (!selectedLeagues || selectedLeagues.length <= 2) {
+    await chrome.storage.local.set({ selectedLeagues: ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'] });
+  }
+
+  chrome.alarms.get('refreshMatches', (alarm) => {
+    if (!alarm) {
+      chrome.alarms.create('refreshMatches', { periodInMinutes: 15 });
     }
   });
+
   updateBadge();
 });

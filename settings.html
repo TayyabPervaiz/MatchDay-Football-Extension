@@ -1,16 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MatchDay Settings</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="settings.css">
 </head>
-
 <body>
     <div class="settings-container">
         <header class="settings-header">
@@ -18,47 +13,68 @@
                 <span>⚽</span>
                 <h1>MatchDay Settings</h1>
             </div>
-            <p class="settings-subtitle">Configure your football experience</p>
+            <p class="settings-subtitle">Configure your football fixtures and API preferences</p>
         </header>
 
         <!-- API Key Section -->
         <section class="settings-section">
             <h2>🔑 API Key</h2>
-            <p class="section-desc">Your football-data.org API key is required to fetch match data.</p>
+            <p class="section-desc">Your football-data.org API key is required to fetch official match fixtures and scores.</p>
             <div class="input-group">
-                <input type="password" id="apiKeyField" placeholder="Enter your API key..." />
-                <button id="toggleApiKey" class="btn-icon" title="Show/Hide">
+                <input type="password" id="apiKeyField" placeholder="Enter your API key..." autocomplete="off" />
+                <button id="toggleApiKey" class="btn-icon" title="Show/Hide Key" aria-label="Toggle visibility">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
                         <circle cx="12" cy="12" r="3"></circle>
                     </svg>
                 </button>
             </div>
-            <button id="saveApiKeyBtn" class="btn-primary">Save API Key</button>
-            <a href="https://www.football-data.org/client/register" target="_blank" class="link-help">Don't have a key?
-                Get one free →</a>
+            <div class="button-row">
+                <button id="saveApiKeyBtn" class="btn-primary">Save API Key</button>
+                <button id="testApiKeyBtn" class="btn-secondary">Test Connection</button>
+                <button id="clearApiKeyBtn" class="btn-ghost">Clear</button>
+                <span id="apiKeyStatus" class="status-msg"></span>
+            </div>
+            <a href="https://www.football-data.org/client/register" target="_blank" rel="noopener noreferrer" class="link-help">Don't have a key? Get a free API key here →</a>
         </section>
 
         <!-- Cache Section -->
         <section class="settings-section">
-            <h2>🗄️ Cache</h2>
-            <p class="section-desc">Match data is cached for 5 minutes to reduce API calls.</p>
-            <button id="clearCacheBtn" class="btn-secondary">Clear Cache</button>
-            <span id="cacheStatus" class="status-msg"></span>
+            <h2>🗄️ Cache Management</h2>
+            <p class="section-desc">Match schedules are cached locally to minimize requests against the 10 requests/min free tier limit.</p>
+            <div class="button-row">
+                <button id="clearCacheBtn" class="btn-secondary">Clear Cache</button>
+                <span id="cacheStatus" class="status-msg"></span>
+            </div>
+        </section>
+
+        <!-- Streaming & Highlights Section -->
+        <section class="settings-section">
+            <h2>📺 Live Streams & Highlights</h2>
+            <p class="section-desc">MatchDay automatically maps direct links for every match:</p>
+            <div class="about-info">
+                <div class="about-row">
+                    <span>Live Match Streams</span>
+                    <span>VIPBox (<a href="https://vipbox.ga/football-schedule" target="_blank" rel="noopener noreferrer" class="link-inline">vipbox.ga</a>)</span>
+                </div>
+                <div class="about-row">
+                    <span>Full Match Highlights</span>
+                    <span>HooFoot (<a href="https://hoofoot.net/" target="_blank" rel="noopener noreferrer" class="link-inline">hoofoot.net</a>)</span>
+                </div>
+            </div>
         </section>
 
         <!-- About Section -->
         <section class="settings-section">
-            <h2>ℹ️ About</h2>
+            <h2>ℹ️ About MatchDay</h2>
             <div class="about-info">
-                <div class="about-row"><span>Version</span><span>1.0.0</span></div>
-                <div class="about-row"><span>Data Source</span><span>football-data.org</span></div>
-                <div class="about-row"><span>Free Tier Limit</span><span>10 requests/min</span></div>
+                <div class="about-row"><span>Version</span><span>1.0.0 (Manifest V3)</span></div>
+                <div class="about-row"><span>Data Source</span><span>football-data.org REST API</span></div>
+                <div class="about-row"><span>Free Tier Quota</span><span>10 requests / minute</span></div>
             </div>
         </section>
     </div>
 
     <script src="settings.js"></script>
 </body>
-
 </html>

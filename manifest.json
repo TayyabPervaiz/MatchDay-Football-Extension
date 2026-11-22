@@ -4,7 +4,11 @@
   "version": "1.0.0",
   "description": "Track upcoming football matches from top leagues worldwide. Follow your favorite clubs and never miss a game.",
   "permissions": ["storage", "alarms"],
-  "host_permissions": ["https://api.football-data.org/*"],
+  "host_permissions": [
+    "https://api.football-data.org/*",
+    "https://vipbox.ga/*",
+    "https://hoofoot.net/*"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

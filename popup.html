@@ -3,22 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MatchDay</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <title>MatchDay - Football Fixtures & Scores</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <!-- API Key Setup Overlay -->
   <div id="apiKeyOverlay" class="overlay hidden">
     <div class="overlay-content">
-      <div class="overlay-icon">🔑</div>
+      <div class="overlay-icon">⚽</div>
       <h2>Welcome to MatchDay</h2>
-      <p>Enter your football-data.org API key to get started</p>
-      <input type="text" id="apiKeyInput" placeholder="Paste your API key here..." />
+      <p>Enter your football-data.org API key to get live fixtures and real-time scores</p>
+      <input type="text" id="apiKeyInput" placeholder="Paste your API key here..." autocomplete="off" />
       <button id="saveApiKey" class="btn-primary">Save & Start</button>
-      <a href="https://www.football-data.org/client/register" target="_blank" class="link-subtle">Get a free API key →</a>
+      <a href="https://www.football-data.org/client/register" target="_blank" rel="noopener noreferrer" class="link-subtle">Get a free API key →</a>
     </div>
   </div>
 
@@ -33,14 +30,14 @@
         </div>
       </div>
       <div class="header-right">
-        <button id="refreshBtn" class="icon-btn" title="Refresh">
+        <button id="refreshBtn" class="icon-btn" title="Refresh matches" aria-label="Refresh">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="23 4 23 10 17 10"></polyline>
             <polyline points="1 20 1 14 7 14"></polyline>
             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
           </svg>
         </button>
-        <button id="settingsBtn" class="icon-btn" title="Settings">
+        <button id="settingsBtn" class="icon-btn" title="Settings" aria-label="Settings">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="3"></circle>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
@@ -68,6 +65,7 @@
 
     <!-- Date Filter Bar (Matches tab only) -->
     <div id="dateFilter" class="date-filter">
+      <button class="date-btn" data-range="yesterday">Yesterday</button>
       <button class="date-btn active" data-range="today">Today</button>
       <button class="date-btn" data-range="tomorrow">Tomorrow</button>
       <button class="date-btn" data-range="week">This Week</button>
@@ -77,6 +75,15 @@
     <main class="content">
       <!-- Matches Tab -->
       <div id="matchesTab" class="tab-content active">
+        <!-- Sub-filter bar (All, Live, My Teams) -->
+        <div id="matchSubFilters" class="filter-bar">
+          <button class="filter-chip active" data-filter="all" id="filterAll">All Matches</button>
+          <button class="filter-chip live-chip" data-filter="live" id="filterLive">
+            <span class="live-dot-mini"></span>Live <span id="liveBadgeCount" class="chip-count">0</span>
+          </button>
+          <button class="filter-chip" data-filter="followed" id="filterFollowed">⭐ My Teams</button>
+        </div>
+
         <div id="matchesList" class="matches-list">
           <!-- Skeleton loaders -->
           <div class="skeleton-group">
@@ -90,6 +97,9 @@
 
       <!-- Leagues Tab -->
       <div id="leaguesTab" class="tab-content">
+        <div class="leagues-header-info">
+          <p>Select the competitions you want to track in MatchDay.</p>
+        </div>
         <div class="leagues-grid" id="leaguesGrid"></div>
       </div>
 
@@ -97,7 +107,7 @@
       <div id="followingTab" class="tab-content">
         <div class="search-bar">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-          <input type="text" id="teamSearch" placeholder="Search teams..." />
+          <input type="text" id="teamSearch" placeholder="Search teams to follow..." autocomplete="off" />
         </div>
         <div id="followedTeams" class="followed-teams"></div>
         <div id="searchResults" class="search-results"></div>
