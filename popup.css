@@ -406,26 +406,69 @@ body {
   background: rgba(255, 68, 68, 0.03);
 }
 
-/* .match-day-header removed — day tag is now inline in .match-main-row */
+/* ── Match Main Row (single flex line per card) ── */
 .match-main-row {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.match-day-tag {
-  font-size: 9px;
+
+/* ── Left Column: contextual status label ── */
+.card-left-label {
+  min-width: 36px;
+  width: 36px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-size: 10px;
   font-weight: 700;
+  line-height: 1.1;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Kickoff time for upcoming matches */
+.card-left-label.time-label {
+  color: var(--accent-2);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+}
+
+/* FT for finished matches */
+.card-left-label.ft-label {
+  color: var(--text-muted);
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  color: var(--text-muted);
-  min-width: 32px;
-  width: 32px;
+  opacity: 0.8;
+}
+
+/* Live minute with pulsing dot */
+.card-left-label.live-label {
+  color: var(--live-color);
+  font-size: 10.5px;
+  gap: 3px;
+}
+.live-dot-sm {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--live-color);
   flex-shrink: 0;
-  line-height: 1;
-  opacity: 0.75;
-  text-align: center;
-  word-break: break-all;
-  font-variant-numeric: tabular-nums;
+  animation: livePulse 1.2s ease infinite;
+}
+
+/* Date (Mon / 22) for This Week view */
+.card-left-label.date-label {
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  line-height: 1.3;
+  opacity: 0.85;
 }
 
 .match-teams-row {
@@ -478,6 +521,24 @@ body {
   font-size: 11px;
   font-weight: 600;
   color: var(--text-secondary);
+}
+
+/* "vs" divider for upcoming matches (time is in left col) */
+.match-vs {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+/* Countdown under vs (e.g. "2h 15m") */
+.match-countdown {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--accent-2);
+  opacity: 0.85;
+  margin-top: 1px;
 }
 .match-status-badge {
   font-size: 9.5px;

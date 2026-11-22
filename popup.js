@@ -66,6 +66,22 @@ function formatLocalDate(d) {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
+  // ── Left column contextual label ───────────────────────────────────────
+  let leftColHtml = '';
+  if (dateRange === 'week') {
+    const d = new Date(match.utcDate);
+    const weekday = d.toLocaleDateString([], { weekday: 'short' }).toUpperCase().slice(0, 3);
+    const day = d.getDate();
+    leftColHtml = `<span class="card-left-label date-label">${weekday}<br>${day}</span>`;
+  } else if (isLive) {
+    const elapsed = match.minute != null ? `${match.minute}'` : (status === 'PAUSED' ? 'HT' : 'LIVE');
+    leftColHtml = `<span class="card-left-label live-label"><span class="live-dot-sm"></span>${elapsed}</span>`;
+  } else if (isFinished) {
+    leftColHtml = `<span class="card-left-label ft-label">FT</span>`;
+  } else {
+    leftColHtml = `<span class="card-left-label time-label">${matchTime}</span>`;
+  }
+
   return `${year}-${month}-${day}`;
 }
 
@@ -352,7 +368,7 @@ function renderMatchesList(matches) {
           </div>
           <span class="competition-count">${group.matches.length}</span>
         </div>
-        ${group.matches.map(m => renderMatchCard(m)).join('')}
+        ${group.matches.map(m => renderMatchCard(m, currentDateRange)).join('')}
       </div>`;
   }
 
@@ -360,7 +376,7 @@ function renderMatchesList(matches) {
 }
 
 // ── Render Match Card with Direct Links ─
-function renderMatchCard(match) {
+function renderMatchCard(match, dateRange) {
   const homeTeam = match.homeTeam || {};
   const awayTeam = match.awayTeam || {};
   const status = match.status;
@@ -376,14 +392,13 @@ function renderMatchCard(match) {
   const matchTime = new Date(match.utcDate).toLocaleTimeString([], {
     hour: '2-digit', minute: '2-digit'
   });
-  const dayTag = formatMatchDay(match.utcDate);
 
   if (isFinished) {
     const ft = score.fullTime || {};
     const homeGoals = (ft.home !== null && ft.home !== undefined) ? ft.home : '-';
     const awayGoals = (ft.away !== null && ft.away !== undefined) ? ft.away : '-';
     scoreHtml = `<span class="match-score">${homeGoals} – ${awayGoals}</span>`;
-    statusBadgeHtml = `<span class="match-status-badge finished">FT</span>`;
+    // FT shown in left column — no badge needed
     // Direct link to exact HooFoot highlight video (null if not yet indexed)
     if (match.highlightsUrl) {
       mediaBtnHtml = `
@@ -399,16 +414,16 @@ function renderMatchCard(match) {
   } else if (isLive) {
     const ft = score.fullTime || {};
     scoreHtml = `<span class="match-score">${ft.home ?? 0} – ${ft.away ?? 0}</span>`;
-    statusBadgeHtml = `<span class="match-status-badge live">${status === 'PAUSED' ? 'HT' : 'LIVE'}</span>`;
+    // LIVE/HT shown in left column — no badge needed
     // Direct link to exact VIPBox live stream
     mediaBtnHtml = `
       <button class="btn-media live open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Watch live stream on VIPBox">
         <span class="live-dot-mini"></span> Live
       </button>`;
   } else {
-    // Scheduled / Timed
-    scoreHtml = `<span class="match-time">${matchTime}</span>`;
-    statusBadgeHtml = `<span class="match-status-badge scheduled" data-utc="${escapeHtml(match.utcDate)}">${getCountdown(match.utcDate)}</span>`;
+    // Scheduled / Timed — time is in left col, centre shows "vs" + countdown
+    scoreHtml = `<span class="match-vs">vs</span>`;
+    statusBadgeHtml = `<span class="match-countdown" data-utc="${escapeHtml(match.utcDate)}">${getCountdown(match.utcDate)}</span>`;
     // Direct link to VIPBox stream schedule / room
     mediaBtnHtml = `
       <button class="btn-media stream open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Stream schedule on VIPBox">
@@ -419,7 +434,7 @@ function renderMatchCard(match) {
   return `
     <div class="match-card ${isLive ? 'is-live' : ''}">
       <div class="match-main-row">
-        <span class="match-day-tag">${escapeHtml(dayTag)}</span>
+        ${leftColHtml}
         <div class="match-teams-row">
           <div class="match-team home">
             <img src="${escapeHtml(homeTeam.crest || CREST_FALLBACK)}" alt="" />
