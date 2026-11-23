@@ -13,6 +13,7 @@ let allLeagues = {};
 let currentMatches = [];
 let collapsedLeagues = new Set();
 let lastFetchTimestamp = null;
+let lastLiveRefresh = 0;
 const teamsCache = new Map(); // In-memory lookup
 
 // ── DOM Refs ────────────────────────────
@@ -295,7 +296,7 @@ function setupSubFilters() {
 }
 
 // ── Load Matches ────────────────────────
-async function loadMatches(isSilent = false) {
+async function loadMatches(isSilent = false, specificComps = null) {
   if (!navigator.onLine) {
     showMatchesError('You are offline. Reconnect to load live fixtures.', true);
     return;
@@ -312,22 +313,37 @@ async function loadMatches(isSilent = false) {
     type: 'GET_MATCHES',
     dateFrom: from,
     dateTo: to,
-    competitions: selectedLeagues
+    competitions: specificComps || selectedLeagues
   }, (res) => {
     if (chrome.runtime.lastError) {
-      showMatchesError('Connection error. Please try again.');
+      if (!isSilent) showMatchesError('Connection error. Please try again.');
       return;
     }
     if (!res) {
-      showMatchesError('No response from service worker. Try refreshing.');
+      if (!isSilent) showMatchesError('No response from service worker. Try refreshing.');
       return;
     }
     if (res.success) {
-      currentMatches = res.data || [];
+      if (specificComps && specificComps.length > 0) {
+        // Merge updated live matches into existing list
+        const updated = res.data || [];
+        const updatedMap = new Map(updated.map(m => [m.id, m]));
+        currentMatches = currentMatches.map(m => updatedMap.has(m.id) ? updatedMap.get(m.id) : m);
+      } else {
+        currentMatches = res.data || [];
+      }
+
       lastFetchTimestamp = Date.now();
       updateLiveBadgeAndEmphasis();
       applyFiltersAndRender();
-      setStatus(`${currentMatches.length} match${currentMatches.length !== 1 ? 'es' : ''} loaded`);
+
+      if (res.isRateLimited) {
+        setStatus(`Rate limit reached – showing cached fixtures (${currentMatches.length})`);
+      } else if (res.isStale) {
+        setStatus(`Showing cached fixtures (${currentMatches.length})`);
+      } else {
+        setStatus(`${currentMatches.length} match${currentMatches.length !== 1 ? 'es' : ''} loaded`);
+      }
       updateRelativeTime();
     } else {
       if (res.error === 'NO_API_KEY') {
@@ -335,7 +351,7 @@ async function loadMatches(isSilent = false) {
       } else if (res.error === 'INVALID_API_KEY') {
         showMatchesError('Invalid API key. Please update in Settings.');
       } else if (res.error === 'RATE_LIMIT') {
-        showMatchesError('API rate limit reached (10/min). Please wait a moment.');
+        setStatus('API rate limit reached (10/min) – showing cached matches');
       } else {
         showMatchesError(res.error || 'Failed to load matches.');
       }
@@ -345,7 +361,7 @@ async function loadMatches(isSilent = false) {
 
 // ── Update Live Badge Count & Visual Prominence ──
 function updateLiveBadgeAndEmphasis() {
-  const liveCount = currentMatches.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED').length;
+  const liveCount = currentMatches.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED' || m.isLive).length;
 
   if (liveBadgeCount && filterLiveBtn) {
     if (liveCount > 0) {
@@ -367,7 +383,7 @@ function applyFiltersAndRender() {
   let filtered = currentMatches;
 
   if (currentSubFilter === 'live') {
-    filtered = filtered.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED');
+    filtered = filtered.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED' || m.isLive);
   } else if (currentSubFilter === 'followed') {
     const followedIds = new Set(followedTeams.map(t => t.id));
     filtered = filtered.filter(m =>
@@ -465,7 +481,7 @@ function renderMatchesList(matches) {
     }
     const group = grouped.get(compCode);
     group.matches.push(m);
-    if (m.status === 'IN_PLAY' || m.status === 'PAUSED') {
+    if (m.status === 'IN_PLAY' || m.status === 'PAUSED' || m.isLive) {
       group.hasLive = true;
     }
   });
@@ -536,8 +552,8 @@ function renderMatchCard(match, dateRange) {
   const status = match.status;
   const score = match.score || {};
 
-  const isLive = status === 'IN_PLAY' || status === 'PAUSED';
-  const isFinished = status === 'FINISHED';
+  const isLive = (status === 'IN_PLAY' || status === 'PAUSED' || match.isLive);
+  const isFinished = (status === 'FINISHED' || match.isFinished);
 
   // Contextual Left Column
   let leftColHtml = '';
@@ -547,7 +563,7 @@ function renderMatchCard(match, dateRange) {
     const day = d.getDate();
     leftColHtml = `<span class="card-left-label date-label" aria-label="${weekday} ${day}">${weekday}<br>${day}</span>`;
   } else if (isLive) {
-    const elapsed = match.minute != null ? `${match.minute}'` : (status === 'PAUSED' ? 'HT' : 'LIVE');
+    const elapsed = match.elapsedMins != null ? `${match.elapsedMins}'` : (match.minute != null ? `${match.minute}'` : (status === 'PAUSED' ? 'HT' : 'LIVE'));
     leftColHtml = `<span class="card-left-label live-label" aria-label="Live ${elapsed}"><span class="live-dot-sm" aria-hidden="true"></span>${elapsed}</span>`;
   } else if (isFinished) {
     leftColHtml = `<span class="card-left-label ft-label" aria-label="Full Time">FT</span>`;
@@ -566,20 +582,21 @@ function renderMatchCard(match, dateRange) {
   const ft = score.fullTime || {};
 
   if (isFinished) {
-    const homeGoals = (ft.home !== null && ft.home !== undefined) ? ft.home : '-';
-    const awayGoals = (ft.away !== null && ft.away !== undefined) ? ft.away : '-';
+    const homeGoals = (ft.home !== null && ft.home !== undefined) ? ft.home : null;
+    const awayGoals = (ft.away !== null && ft.away !== undefined) ? ft.away : null;
 
-    if (ft.home !== null && ft.away !== null && ft.home !== undefined && ft.away !== undefined) {
-      if (ft.home > ft.away) {
+    if (homeGoals !== null && awayGoals !== null) {
+      if (homeGoals > awayGoals) {
         homeWinnerClass = 'team-winner';
         awayWinnerClass = 'team-loser';
-      } else if (ft.away > ft.home) {
+      } else if (awayGoals > homeGoals) {
         homeWinnerClass = 'team-loser';
         awayWinnerClass = 'team-winner';
       }
+      scoreHtml = `<span class="match-score">${homeGoals} – ${awayGoals}</span>`;
+    } else {
+      scoreHtml = `<span class="match-score">FT</span>`;
     }
-
-    scoreHtml = `<span class="match-score">${homeGoals} – ${awayGoals}</span>`;
 
     if (match.highlightsUrl) {
       mediaBtnHtml = `
@@ -664,13 +681,19 @@ function renderMatchCard(match, dateRange) {
     </div>`;
 }
 
-// ── Countdown Calculation ───────────────
+// ── Countdown Calculation with Lapsed Match Defense ──
 function getCountdown(utcDate) {
   const now = new Date();
   const match = new Date(utcDate);
   const diff = match - now;
 
-  if (diff <= 0) return 'Starting';
+  if (diff <= 0) {
+    const elapsedMins = Math.floor((now - match) / (60 * 1000));
+    if (elapsedMins > 115) return 'FT';
+    if (elapsedMins > 90) return 'FT soon';
+    if (elapsedMins > 45) return '2nd Half';
+    return 'Live';
+  }
 
   const hours = Math.floor(diff / (1000 * 60 * 60));
   const mins = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
@@ -695,10 +718,17 @@ function tickTimersAndLiveScores() {
   // 2. Relative time update
   updateRelativeTime();
 
-  // 3. Auto-refresh only when live matches are active
-  const hasLive = currentMatches.some(m => m.status === 'IN_PLAY' || m.status === 'PAUSED');
-  if (hasLive && currentTab === 'matches') {
-    loadMatches(true);
+  // 3. Auto-refresh only when live matches are active (throttled to at most once per 60s)
+  const now = Date.now();
+  const hasLive = currentMatches.some(m => m.status === 'IN_PLAY' || m.status === 'PAUSED' || m.isLive);
+  if (hasLive && currentTab === 'matches' && (now - lastLiveRefresh >= 60 * 1000)) {
+    lastLiveRefresh = now;
+    // Only refresh the competition(s) with live matches to minimize rate limit quota!
+    const liveComps = Array.from(new Set(
+      currentMatches.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED' || m.isLive)
+        .map(m => m.competitionCode)
+    ));
+    loadMatches(true, liveComps.length > 0 ? liveComps : null);
   }
 }
 
@@ -725,7 +755,7 @@ function showMatchesSkeleton() {
       <div class="skeleton skeleton-header"></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>
-      <div class="skeleton skeleton-header" style="margin-top:10px"></div>
+      <div class="skeleton-header" style="margin-top:10px"></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div></div>
     </div>`;
 }

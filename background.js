@@ -1,11 +1,13 @@
 /* ═══════════════════════════════════════════
    MatchDay – Background Service Worker
+   Robust Caching, Rate-Limit Defense & Inferred Match Lifecycle
    ═══════════════════════════════════════════ */
 
 const API_BASE = 'https://api.football-data.org/v4';
-const MATCHES_CACHE_TTL = 3 * 60 * 1000;       // 3 minutes
-const TEAMS_CACHE_TTL = 14 * 24 * 60 * 60 * 1000; // 14 days
-const HOOFOOT_INDEX_TTL = 30 * 60 * 1000;       // 30 minutes
+const MATCHES_CACHE_TTL = 3 * 60 * 1000;          // 3 minutes fresh cache
+const STALE_FALLBACK_TTL = 24 * 60 * 60 * 1000;    // 24 hours stale fallback
+const TEAMS_CACHE_TTL = 14 * 24 * 60 * 60 * 1000;  // 14 days
+const HOOFOOT_INDEX_TTL = 30 * 60 * 1000;          // 30 minutes
 
 const LEAGUES = {
   CL:  { name: 'Champions League',       country: 'Europe',        emoji: '🏆', priority: 1,  hoofootSlug: 'champions-league' },
@@ -54,8 +56,8 @@ function slugify(text) {
   if (!text) return '';
   return text
     .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // diacritics -> base char (é->e)
-    .replace(/['']/g, '')                               // remove apostrophes
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // diacritics -> base char
+    .replace(/['’]/g, '')                               // remove apostrophes
     .replace(/\b(fc|cf|sc|afc|bsc|sv|ac|rc|sk|cd|as|ss|vfb|tsv|rcd|ud|sd)\b/gi, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
@@ -67,9 +69,8 @@ function teamTokens(name) {
   if (!name) return [];
   return name
     .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // strip diacritics -> base chars
-    .replace(/['']/g, '')
-    // Strip common club affixes & noise words that HooFoot slugs often omit
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // strip diacritics
+    .replace(/['’]/g, '')
     .replace(/\b(fc|cf|sc|afc|bsc|sv|ac|rc|sk|cd|rcd|ud|sd|club|de|la|le|les|el|los|las)\b/gi, '')
     .replace(/[^a-z0-9\s]+/g, ' ')
     .trim()
@@ -79,7 +80,6 @@ function teamTokens(name) {
 
 // ── Score how well a HooFoot slug matches a home+away pair ───────────────
 function slugMatchScore(slug, homeToks, awayToks) {
-  // Normalise the slug itself to ASCII base chars before scoring
   const s = slug.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   const homeHits = homeToks.filter(t => s.includes(t)).length;
   const awayHits = awayToks.filter(t => s.includes(t)).length;
@@ -112,13 +112,13 @@ async function apiFetch(endpoint, params = {}) {
   return response.json();
 }
 
-// ── Cache Helper ────────────────────────
-async function getCached(key, ttl = MATCHES_CACHE_TTL) {
+// ── Cache Helper with Stale-While-Revalidate ─
+async function getCachedWithStale(key, ttl = MATCHES_CACHE_TTL) {
   const data = await chrome.storage.local.get(key);
   if (!data[key]) return null;
   const { value, timestamp } = data[key];
-  if (Date.now() - timestamp > ttl) return null;
-  return value;
+  const isStale = (Date.now() - timestamp > ttl);
+  return { value, isStale, timestamp };
 }
 
 async function setCache(key, value) {
@@ -128,12 +128,12 @@ async function setCache(key, value) {
 // ── Sync Live Schedule from VIPBox ──────
 async function getVipboxSchedule() {
   const cacheKey = 'vipbox_schedule';
-  const cached = await getCached(cacheKey, 10 * 60 * 1000); // 10 min cache
-  if (cached) return cached;
+  const cached = await getCachedWithStale(cacheKey, 10 * 60 * 1000);
+  if (cached && !cached.isStale && cached.value) return cached.value;
 
   try {
     const res = await fetch('https://vipbox.ga/football-schedule', { cache: 'no-store' });
-    if (!res.ok) return [];
+    if (!res.ok) return cached?.value || [];
     const html = await res.text();
     const list = [];
     const regex = /href="(\/onair\/football\/([^"]+))"/g;
@@ -144,19 +144,21 @@ async function getVipboxSchedule() {
         slug: m[2]
       });
     }
-    await setCache(cacheKey, list);
+    if (list.length > 0) {
+      await setCache(cacheKey, list);
+    }
     return list;
   } catch (e) {
     console.warn('VIPBox live schedule fetch failed:', e.message);
-    return [];
+    return cached?.value || [];
   }
 }
 
 // ── Fetch & Cache HooFoot League Index (article hrefs) ───────────────────
 async function getHoofootLeagueIndex(leagueSlug) {
   const cacheKey = `hoofoot_index_${leagueSlug}`;
-  const cached = await getCached(cacheKey, HOOFOOT_INDEX_TTL);
-  if (cached) return cached;
+  const cached = await getCachedWithStale(cacheKey, HOOFOOT_INDEX_TTL);
+  if (cached && !cached.isStale && cached.value) return cached.value;
 
   try {
     const res = await fetch(`https://hoofoot.net/full-matches/${leagueSlug}/`, {
@@ -164,12 +166,10 @@ async function getHoofootLeagueIndex(leagueSlug) {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     if (!res.ok) {
-      console.warn(`HooFoot index fetch failed for ${leagueSlug}: HTTP ${res.status}`);
-      return [];
+      return cached?.value || [];
     }
     const html = await res.text();
     const articles = [];
-    // HooFoot uses RELATIVE hrefs: /full-matches/{league}/slug/
     const hrefRegex = /href="(\/full-matches\/[^"]+)"/g;
     let m;
     while ((m = hrefRegex.exec(html)) !== null) {
@@ -177,11 +177,9 @@ async function getHoofootLeagueIndex(leagueSlug) {
       const prefix = `/full-matches/${leagueSlug}/`;
       if (!href.startsWith(prefix)) continue;
       const after = href.slice(prefix.length).replace(/\/$/, '');
-      // Skip pagination / category pages (empty or nested)
       if (!after || after.includes('/')) continue;
       articles.push({ url: `https://hoofoot.net${href}`, slug: after });
     }
-    // Deduplicate
     const seen = new Set();
     const unique = articles.filter(a => {
       if (seen.has(a.url)) return false;
@@ -194,7 +192,7 @@ async function getHoofootLeagueIndex(leagueSlug) {
     return unique;
   } catch (e) {
     console.warn(`HooFoot index fetch error for ${leagueSlug}:`, e.message);
-    return [];
+    return cached?.value || [];
   }
 }
 
@@ -207,18 +205,14 @@ async function findHoofootUrl(homeTeam, awayTeam, leagueSlug, matchDate) {
   const dayStr   = String(d.getUTCDate()).padStart(2, '0');
   const yearStr  = d.getUTCFullYear();
 
-  // Tokens extracted from team names (ASCII normalised, noise words stripped)
   const homeToks = teamTokens(homeTeam);
   const awayToks = teamTokens(awayTeam);
 
-  // 1. Try live index from HooFoot league page
   const index = await getHoofootLeagueIndex(leagueSlug);
-  if (index.length > 0) {
-    // Filter to articles plausibly dated within ±2 days of the match
+  if (index && index.length > 0) {
     const dateHints = [monthName, String(d.getUTCDate()), yearStr.toString()];
     const dated = index.filter(a =>
       dateHints.some(hint => a.slug.includes(hint)) ||
-      // Allow undated slugs that strongly match team names
       slugMatchScore(a.slug, homeToks, awayToks) >= 1.5
     );
 
@@ -233,19 +227,18 @@ async function findHoofootUrl(homeTeam, awayTeam, leagueSlug, matchDate) {
       }
     }
 
-    // Threshold: at least one token from EACH team must match (score >= ~0.5 each side)
     if (best && bestScore >= 1.0) {
       return best.url;
     }
   }
 
-  // 2. Fallback: construct URL with our standard slugify (works for ASCII-only names)
+  // Fallback slug
   const homeSlug = slugify(homeTeam);
   const awaySlug = slugify(awayTeam);
   return `https://hoofoot.net/full-matches/${leagueSlug}/${homeSlug}-vs-${awaySlug}-highlights-${monthName}-${dayStr}-${yearStr}/`;
 }
 
-// ── Enrich Match with Media Links & Slugs ─────────────────────────────────
+// ── Enrich Match with Media Links & Inferred Lapsed Status ────────────────
 async function enrichMatch(m, vipSchedule = []) {
   const code = m.competition?.code;
   const leagueMeta = LEAGUES[code] || {};
@@ -256,6 +249,29 @@ async function enrichMatch(m, vipSchedule = []) {
   const awayName = awayTeam.shortName || awayTeam.name || '';
   const homeSlug = slugify(homeName);
   const awaySlug = slugify(awayName);
+
+  // Time calculations
+  const matchTime = new Date(m.utcDate).getTime();
+  const nowMs = Date.now();
+  const elapsedMs = nowMs - matchTime;
+  const elapsedMins = Math.floor(elapsedMs / (60 * 1000));
+
+  let status = m.status;
+  let isFinished = (status === 'FINISHED');
+  let isLive = (status === 'IN_PLAY' || status === 'PAUSED');
+
+  // Lapsed match inference:
+  // If API still says TIMED/SCHEDULED but kickoff was over 115 minutes ago,
+  // the match is finished, not starting!
+  if (!isFinished && !isLive) {
+    if (elapsedMins > 115) {
+      status = 'FINISHED';
+      isFinished = true;
+    } else if (elapsedMins >= 0 && elapsedMins <= 115) {
+      status = 'IN_PLAY';
+      isLive = true;
+    }
+  }
 
   // 1. VIPBox Direct Match Stream URL (fuzzy match from schedule)
   let liveStreamUrl = `https://vipbox.ga/onair/football/${homeSlug}-vs-${awaySlug}`;
@@ -278,15 +294,23 @@ async function enrichMatch(m, vipSchedule = []) {
 
   // 2. HooFoot Full Match Highlights URL
   const leagueSlug = leagueMeta.hoofootSlug || 'premier-league';
-  const isFinished = (m.status === 'FINISHED');
   let highlightsUrl = null;
 
-  if (isFinished) {
+  // Search HooFoot if match is finished OR if it kicked off over 105 mins ago
+  if (isFinished || elapsedMins > 105) {
     highlightsUrl = await findHoofootUrl(homeName, awayName, leagueSlug, m.utcDate);
+    if (highlightsUrl && !isFinished) {
+      status = 'FINISHED';
+      isFinished = true;
+    }
   }
 
   return {
     ...m,
+    status,
+    isFinished,
+    isLive,
+    elapsedMins: isLive ? Math.min(Math.max(elapsedMins, 1), 90) : null,
     competitionCode: code,
     competitionName: leagueMeta.name || m.competition?.name || 'Unknown League',
     competitionEmoji: leagueMeta.emoji || '⚽',
@@ -297,43 +321,80 @@ async function enrichMatch(m, vipSchedule = []) {
   };
 }
 
-// ── Fetch Matches (Competition Queries for Accurate Scores) ─
+// ── Fetch Matches with Per-Competition Caching & Stale Fallbacks ─────────
 async function fetchMatches(dateFrom, dateTo, competitions = []) {
   const comps = (competitions && competitions.length > 0)
     ? competitions
     : ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'];
 
-  const compKey = comps.slice().sort().join(',');
-  const cacheKey = `matches_${dateFrom}_${dateTo}_${compKey}`;
-  const cached = await getCached(cacheKey);
-  if (cached) return cached;
-
-  // Expand query window by ±1 day to capture UTC matches matching local time
   const { apiFrom, apiTo } = getUtcRangeForLocalDate(dateFrom, dateTo);
-
-  // Fetch from /competitions/{code}/matches to ensure accurate FINISHED statuses & full scores
-  const results = await Promise.allSettled(
-    comps.map(code =>
-      apiFetch(`/competitions/${code}/matches`, {
-        dateFrom: apiFrom,
-        dateTo: apiTo
-      })
-    )
-  );
+  const masterKey = `master_matches_${dateFrom}_${dateTo}`;
 
   let rawMatches = [];
-  results.forEach((res, i) => {
-    if (res.status === 'fulfilled' && res.value?.matches) {
-      rawMatches.push(...res.value.matches);
-    } else {
-      console.warn(`Failed to fetch matches for ${comps[i]}:`, res.reason?.message);
-    }
-  });
+  let anyRateLimited = false;
+  let compsToFetch = [];
 
-  // Filter 1: Requested competitions
+  // Step 1: Check per-competition fresh cache
+  for (const code of comps) {
+    const compCacheKey = `comp_${code}_${apiFrom}_${apiTo}`;
+    const cached = await getCachedWithStale(compCacheKey, MATCHES_CACHE_TTL);
+    if (cached && !cached.isStale && cached.value && cached.value.length >= 0) {
+      // Fresh cache hit!
+      rawMatches.push(...cached.value);
+    } else {
+      compsToFetch.push({
+        code,
+        compCacheKey,
+        staleValue: cached ? cached.value : null
+      });
+    }
+  }
+
+  // Step 2: Fetch only competitions that are stale or missing (staggered by 80ms)
+  if (compsToFetch.length > 0) {
+    for (let i = 0; i < compsToFetch.length; i++) {
+      const { code, compCacheKey, staleValue } = compsToFetch[i];
+      if (i > 0) {
+        await new Promise(r => setTimeout(r, 80)); // Prevent simultaneous burst triggering 429
+      }
+
+      try {
+        const res = await apiFetch(`/competitions/${code}/matches`, {
+          dateFrom: apiFrom,
+          dateTo: apiTo
+        });
+        if (res && res.matches) {
+          rawMatches.push(...res.matches);
+          await setCache(compCacheKey, res.matches);
+        } else if (staleValue) {
+          rawMatches.push(...staleValue);
+        }
+      } catch (err) {
+        console.warn(`Fetch failed for ${code}:`, err.message);
+        if (err.message === 'RATE_LIMIT') {
+          anyRateLimited = true;
+        }
+        // Fall back to stale cache if available
+        if (staleValue && staleValue.length > 0) {
+          rawMatches.push(...staleValue);
+        }
+      }
+    }
+  }
+
+  // Step 3: Filter by requested competitions
   let filtered = rawMatches.filter(m => comps.includes(m.competition?.code));
 
-  // Filter 2: Local Timezone Date Matching
+  // Deduplicate matches by ID
+  const seenIds = new Set();
+  filtered = filtered.filter(m => {
+    if (!m.id) return true;
+    if (seenIds.has(m.id)) return false;
+    seenIds.add(m.id);
+    return true;
+  });
+
+  // Step 4: Local Timezone Date Matching
   const todayStr = formatLocalDate(new Date());
   const includesToday = (dateFrom <= todayStr && todayStr <= dateTo);
 
@@ -344,12 +405,27 @@ async function fetchMatches(dateFrom, dateTo, competitions = []) {
     return isWithinLocalRange || (includesToday && isLiveNow);
   });
 
-  // Enrich all matches with VIPBox & HooFoot URLs
+  // Step 5: Enrich with VIPBox & HooFoot URLs
   const vipSchedule = await getVipboxSchedule();
   const enriched = await Promise.all(filtered.map(m => enrichMatch(m, vipSchedule)));
 
-  // Sort by FotMob sequencing:
-  // 1. Hoist LIVE matches (IN_PLAY, PAUSED) to top
+  // Step 6: Master Fallback Cache Management
+  if (enriched.length > 0) {
+    await setCache(masterKey, enriched);
+  } else {
+    // If rate-limited and enriched is empty, fall back to master cache!
+    const masterFallback = await getCachedWithStale(masterKey, STALE_FALLBACK_TTL);
+    if (masterFallback && masterFallback.value && masterFallback.value.length > 0) {
+      return {
+        matches: masterFallback.value,
+        isRateLimited: anyRateLimited,
+        isStale: true
+      };
+    }
+  }
+
+  // Step 7: Sort by FotMob sequencing
+  // 1. Hoist LIVE matches to top
   // 2. Sort by League Priority tier
   // 3. Chronological by kickoff time
   enriched.sort((a, b) => {
@@ -364,19 +440,18 @@ async function fetchMatches(dateFrom, dateTo, competitions = []) {
     return new Date(a.utcDate) - new Date(b.utcDate);
   });
 
-  // Only cache non-empty results to avoid locking users out
-  if (enriched.length > 0) {
-    await setCache(cacheKey, enriched);
-  }
-
-  return enriched;
+  return {
+    matches: enriched,
+    isRateLimited: anyRateLimited,
+    isStale: anyRateLimited
+  };
 }
 
 // ── Fetch Teams for a Competition (Long-term 14d cache) ─
 async function fetchTeams(competitionCode) {
   const cacheKey = `teams_${competitionCode}`;
-  const cached = await getCached(cacheKey, TEAMS_CACHE_TTL);
-  if (cached) return cached;
+  const cached = await getCachedWithStale(cacheKey, TEAMS_CACHE_TTL);
+  if (cached && !cached.isStale && cached.value) return cached.value;
 
   try {
     const data = await apiFetch(`/competitions/${competitionCode}/teams`);
@@ -393,7 +468,7 @@ async function fetchTeams(competitionCode) {
     return teams;
   } catch (e) {
     console.warn(`Failed to fetch teams for ${competitionCode}:`, e.message);
-    return [];
+    return cached?.value || [];
   }
 }
 
@@ -424,7 +499,8 @@ async function updateBadge() {
 
     const { selectedLeagues = ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'] } = await chrome.storage.local.get('selectedLeagues');
     const today = formatLocalDate(new Date());
-    const matches = await fetchMatches(today, today, selectedLeagues);
+    const res = await fetchMatches(today, today, selectedLeagues);
+    const matches = res.matches || [];
 
     const liveMatches = matches.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED');
     if (liveMatches.length > 0) {
@@ -446,8 +522,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       switch (msg.type) {
         case 'GET_MATCHES': {
-          const matches = await fetchMatches(msg.dateFrom, msg.dateTo, msg.competitions);
-          sendResponse({ success: true, data: matches });
+          const res = await fetchMatches(msg.dateFrom, msg.dateTo, msg.competitions);
+          sendResponse({
+            success: true,
+            data: res.matches,
+            isRateLimited: res.isRateLimited,
+            isStale: res.isStale
+          });
           break;
         }
         case 'GET_TEAMS': {
@@ -467,7 +548,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case 'REFRESH': {
           const storage = await chrome.storage.local.get(null);
           const matchKeys = Object.keys(storage).filter(k =>
-            k.startsWith('matches_') || k === 'vipbox_schedule' || k.startsWith('hoofoot_index_')
+            k.startsWith('comp_') || k.startsWith('master_matches_') || k.startsWith('matches_') || k === 'vipbox_schedule' || k.startsWith('hoofoot_index_')
           );
           await chrome.storage.local.remove(matchKeys);
           await updateBadge();
@@ -503,10 +584,10 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
-  // Clear any stale match + HooFoot index cache on reload
+  // Clear any stale cache on install
   const storage = await chrome.storage.local.get(null);
   const staleKeys = Object.keys(storage).filter(k =>
-    k.startsWith('matches_') || k.startsWith('hoofoot_index_')
+    k.startsWith('comp_') || k.startsWith('master_matches_') || k.startsWith('matches_') || k.startsWith('hoofoot_index_')
   );
   if (staleKeys.length > 0) {
     await chrome.storage.local.remove(staleKeys);
