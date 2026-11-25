@@ -9,6 +9,7 @@ let currentDateRange = 'today';
 let currentSubFilter = 'all'; // 'all' | 'live' | 'followed'
 let selectedLeagues = ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'];
 let followedTeams = [];
+let isFetching = false; // Fix B7/debounce: prevent concurrent full reloads
 let allLeagues = {};
 let currentMatches = [];
 let collapsedLeagues = new Set();
@@ -36,13 +37,45 @@ const lastUpdated = $('#lastUpdated');
 const liveBadgeCount = $('#liveBadgeCount');
 const filterLiveBtn = $('#filterLive');
 
-const CREST_FALLBACK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236d738f'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E";
+const CREST_FALLBACK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23333'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E";
 
-// ── Error Boundary for Images ───────────
+// ── Initials Avatar (used when no crest URL is available) ──
+// Returns an HTML string: either an <img> (if crestUrl is non-empty) or
+// a styled <span> showing up to 3 initials letters.
+const AVATAR_PALETTE = [
+  '#e84000','#c0392b','#2980b9','#27ae60','#8e44ad',
+  '#d35400','#16a085','#2c3e50','#7f8c8d','#f39c12'
+];
+function teamAvatarHtml(name, crestUrl, cssClass = 'team-crest') {
+  if (crestUrl) {
+    return `<img src="${escapeHtml(crestUrl)}" alt="${escapeHtml(name)}" class="${cssClass}" loading="lazy" />`;
+  }
+  return makeInitialsAvatarHtml(name);
+}
+function makeInitialsAvatarHtml(name) {
+  if (!name) name = '?';
+  // Build 2-3 letter initials
+  const words = name.trim().replace(/[^a-zA-Z0-9\s]/g,' ').split(/\s+/).filter(Boolean);
+  let initials;
+  if (words.length >= 2) {
+    initials = (words[0][0] + words[words.length - 1][0]).toUpperCase();
+  } else {
+    initials = name.slice(0, 2).toUpperCase();
+  }
+  // Pick a stable color based on first char code
+  const color = AVATAR_PALETTE[name.charCodeAt(0) % AVATAR_PALETTE.length];
+  return `<span class="team-avatar" style="background:${color}22;border-color:${color}44;color:${color}" title="${escapeHtml(name)}">${escapeHtml(initials)}</span>`;
+}
+
+// ── Error Boundary for Images (replace broken img with initials avatar) ──
 document.addEventListener('error', (e) => {
-  if (e.target && e.target.tagName === 'IMG') {
-    e.target.onerror = null;
-    e.target.src = CREST_FALLBACK;
+  if (e.target && e.target.tagName === 'IMG' && e.target.classList.contains('team-crest')) {
+    const name = e.target.alt || e.target.closest('[data-team-name]')?.dataset.teamName || '?';
+    const temp = document.createElement('div');
+    temp.innerHTML = makeInitialsAvatarHtml(name);
+    if (temp.firstChild) {
+      e.target.replaceWith(temp.firstChild);
+    }
   }
 }, true);
 
@@ -182,14 +215,70 @@ function setupOfflineListeners() {
   });
 }
 
-// ── API Key Form ────────────────────────
+// ── API Key Form with Multi-Provider Support ────────
 function setupApiKeyForm() {
+  let selectedProvider = 'openfoot';
+  const btnOF = document.getElementById('setupProviderOpenFoot');
+  const btnFD = document.getElementById('setupProviderFD');
+  const linkEl = document.getElementById('setupApiKeyLink');
+
+  function updateSetupProvider(provider) {
+    selectedProvider = provider;
+    btnOF?.classList.toggle('active', provider === 'openfoot');
+    btnFD?.classList.toggle('active', provider === 'football_data');
+    if (apiKeyInput) {
+      apiKeyInput.placeholder = provider === 'openfoot'
+        ? 'Paste your OpenFootAPI key...'
+        : 'Paste your Football-Data.org API key...';
+    }
+    if (linkEl) {
+      linkEl.textContent = provider === 'openfoot'
+        ? 'Get a free OpenFootAPI key here →'
+        : 'Get a free Football-Data.org key here →';
+      linkEl.href = provider === 'openfoot'
+        ? 'https://openfootapi.com'
+        : 'https://www.football-data.org/client/register';
+    }
+  }
+
+  btnOF?.addEventListener('click', () => updateSetupProvider('openfoot'));
+  btnFD?.addEventListener('click', () => updateSetupProvider('football_data'));
+
   saveApiKeyBtn.addEventListener('click', async () => {
     const key = apiKeyInput.value.trim();
     if (!key) return;
-    await chrome.storage.local.set({ apiKey: key });
-    apiKeyOverlay.classList.add('hidden');
-    loadMatches();
+
+    const errEl = document.getElementById('apiKeyError');
+    saveApiKeyBtn.textContent = 'Checking…';
+    saveApiKeyBtn.disabled = true;
+    if (errEl) errEl.textContent = '';
+
+    chrome.runtime.sendMessage({
+      type: 'TEST_API_KEY',
+      apiKey: key,
+      provider: selectedProvider
+    }, async (res) => {
+      if (res?.success) {
+        const toSave = {
+          apiProvider: selectedProvider,
+          apiKey: key
+        };
+        if (selectedProvider === 'openfoot') {
+          toSave.apiKey_openfoot = key;
+        } else {
+          toSave.apiKey_footballdata = key;
+        }
+        await chrome.storage.local.set(toSave);
+        apiKeyOverlay.classList.add('hidden');
+        saveApiKeyBtn.textContent = 'Save & Start';
+        saveApiKeyBtn.disabled = false;
+        loadMatches();
+      } else {
+        if (errEl) errEl.textContent = `❌ Key rejected (status ${res?.status || '?'}). Please check and try again.`;
+        saveApiKeyBtn.textContent = 'Save & Start';
+        saveApiKeyBtn.disabled = false;
+      }
+    });
   });
 }
 
@@ -297,11 +386,11 @@ function setupSubFilters() {
 
 // ── Load Matches ────────────────────────
 async function loadMatches(isSilent = false, specificComps = null) {
-  if (!navigator.onLine) {
-    showMatchesError('You are offline. Reconnect to load live fixtures.', true);
-    return;
-  }
+  // Fix B7/debounce: drop concurrent full reloads; allow silent targeted refreshes
+  if (isFetching && !isSilent) return;
+  if (!isSilent) isFetching = true;
 
+  // Fix B7: remove unreliable navigator.onLine pre-check — let the fetch fail naturally
   if (!isSilent) {
     showMatchesSkeleton();
     setStatus('Fetching matches...');
@@ -333,12 +422,15 @@ async function loadMatches(isSilent = false, specificComps = null) {
         currentMatches = res.data || [];
       }
 
+      isFetching = false;
       lastFetchTimestamp = Date.now();
       updateLiveBadgeAndEmphasis();
       applyFiltersAndRender();
 
       if (res.isRateLimited) {
         setStatus(`Rate limit reached – showing cached fixtures (${currentMatches.length})`);
+      } else if (res.isTruncated) {
+        setStatus(`⚠️ Week view limited to 9 days (API cap) · ${currentMatches.length} matches`);
       } else if (res.isStale) {
         setStatus(`Showing cached fixtures (${currentMatches.length})`);
       } else {
@@ -346,12 +438,13 @@ async function loadMatches(isSilent = false, specificComps = null) {
       }
       updateRelativeTime();
     } else {
+      isFetching = false;
       if (res.error === 'NO_API_KEY') {
         apiKeyOverlay.classList.remove('hidden');
       } else if (res.error === 'INVALID_API_KEY') {
         showMatchesError('Invalid API key. Please update in Settings.');
       } else if (res.error === 'RATE_LIMIT') {
-        setStatus('API rate limit reached (10/min) – showing cached matches');
+        setStatus('API rate limit reached – showing cached matches');
       } else {
         showMatchesError(res.error || 'Failed to load matches.');
       }
@@ -563,8 +656,12 @@ function renderMatchCard(match, dateRange) {
     const day = d.getDate();
     leftColHtml = `<span class="card-left-label date-label" aria-label="${weekday} ${day}">${weekday}<br>${day}</span>`;
   } else if (isLive) {
-    const elapsed = match.elapsedMins != null ? `${match.elapsedMins}'` : (match.minute != null ? `${match.minute}'` : (status === 'PAUSED' ? 'HT' : 'LIVE'));
-    leftColHtml = `<span class="card-left-label live-label" aria-label="Live ${elapsed}"><span class="live-dot-sm" aria-hidden="true"></span>${elapsed}</span>`;
+    // Fix B1: show "~LIVE" caveat when status was inferred, not confirmed by API
+    const elapsed = match.elapsedMins != null ? `${match.elapsedMins}'`
+      : (match.minute != null ? `${match.minute}'`
+      : (status === 'PAUSED' ? 'HT' : (match.isInferredLive ? '~LIVE' : 'LIVE')));
+    const inferredClass = match.isInferredLive ? ' inferred' : '';
+    leftColHtml = `<span class="card-left-label live-label${inferredClass}" aria-label="Live ${elapsed}" title="${match.isInferredLive ? 'Status inferred — not yet confirmed by API' : ''}"><span class="live-dot-sm" aria-hidden="true"></span>${elapsed}</span>`;
   } else if (isFinished) {
     leftColHtml = `<span class="card-left-label ft-label" aria-label="Full Time">FT</span>`;
   } else {
@@ -610,7 +707,11 @@ function renderMatchCard(match, dateRange) {
         </span>`;
     }
   } else if (isLive) {
-    scoreHtml = `<span class="match-score">${ft.home ?? 0} – ${ft.away ?? 0}</span>`;
+    // Fix B5: read regularTime (running score) not fullTime (only set at final whistle)
+    const rt = score.regularTime || score.halfTime || {};
+    const liveHome = rt.home ?? ft.home ?? 0;
+    const liveAway = rt.away ?? ft.away ?? 0;
+    scoreHtml = `<span class="match-score">${liveHome} – ${liveAway}</span>`;
     mediaBtnHtml = `
       <button class="btn-media live open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Watch live match stream on VIPBox" aria-label="Watch Live">
         <span class="live-dot-mini" aria-hidden="true"></span> Live
@@ -625,8 +726,11 @@ function renderMatchCard(match, dateRange) {
       </button>`;
   }
 
-  // Primary URL for clicking anywhere on the card
-  const primaryUrl = isFinished ? (match.highlightsUrl || 'https://hoofoot.net') : (match.liveStreamUrl || 'https://vipbox.ga/football-schedule');
+  // Fix B11: use leagueHighlightsPage fallback so card click goes to the
+  // league highlights index — not the HooFoot homepage — when no specific URL exists.
+  const primaryUrl = isFinished
+    ? (match.highlightsUrl || match.leagueHighlightsPage || 'https://hoofoot.net')
+    : (match.liveStreamUrl || 'https://vipbox.ga/football-schedule');
 
   // Check if teams are followed
   const isHomeFollowed = followedTeams.some(t => t.id === homeTeam.id);
@@ -651,7 +755,7 @@ function renderMatchCard(match, dateRange) {
                     aria-label="${isHomeFollowed ? 'Unfollow' : 'Follow'} ${escapeHtml(homeFullName)}">
               ${isHomeFollowed ? '★' : '☆'}
             </button>
-            <img src="${escapeHtml(homeTeam.crest || CREST_FALLBACK)}" alt="" class="team-crest" loading="lazy" />
+            ${teamAvatarHtml(homeFullName, homeTeam.crest)}
             <span class="team-name" title="${escapeHtml(homeFullName)}">${escapeHtml(homeTeam.shortName || homeTeam.name || 'TBD')}</span>
           </div>
 
@@ -662,7 +766,7 @@ function renderMatchCard(match, dateRange) {
 
           <div class="match-team away ${awayWinnerClass}">
             <span class="team-name" title="${escapeHtml(awayFullName)}">${escapeHtml(awayTeam.shortName || awayTeam.name || 'TBD')}</span>
-            <img src="${escapeHtml(awayTeam.crest || CREST_FALLBACK)}" alt="" class="team-crest" loading="lazy" />
+            ${teamAvatarHtml(awayFullName, awayTeam.crest)}
             <button class="team-star-btn ${isAwayFollowed ? 'active' : ''}" 
                     data-team-id="${awayTeam.id}" 
                     data-team-name="${escapeHtml(awayFullName)}" 
@@ -874,7 +978,7 @@ function renderSearchResults(teams) {
     const isFollowing = followedIds.has(team.id);
     return `
       <div class="team-card" data-team-id="${team.id}">
-        <img src="${escapeHtml(team.crest || CREST_FALLBACK)}" alt="" loading="lazy" />
+        ${teamAvatarHtml(team.name, team.crest)}
         <div class="team-info">
           <div class="team-name" title="${escapeHtml(team.name)}">${escapeHtml(team.name)}</div>
           <div class="team-league">${escapeHtml(team.competitionName || '')}</div>
@@ -912,7 +1016,7 @@ function renderFollowedTeams() {
     <div class="followed-label">Your Teams (${followedTeams.length})</div>
     ${followedTeams.map(team => `
       <div class="team-card" data-team-id="${team.id}">
-        <img src="${escapeHtml(team.crest || CREST_FALLBACK)}" alt="" loading="lazy" />
+        ${teamAvatarHtml(team.name, team.crest)}
         <div class="team-info">
           <div class="team-name" title="${escapeHtml(team.name)}">${escapeHtml(team.name)}</div>
           <div class="team-league">${escapeHtml(team.competitionName || '')}</div>

@@ -3,19 +3,26 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MatchDay - Football Fixtures & Scores</title>
+  <title>MatchDay - Football Fixtures &amp; Scores</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <!-- API Key Setup Overlay -->
   <div id="apiKeyOverlay" class="overlay hidden" role="dialog" aria-labelledby="apiKeyHeading" aria-modal="true">
     <div class="overlay-content">
-      <div class="overlay-icon" aria-hidden="true">⚽</div>
-      <h2 id="apiKeyHeading">Welcome to MatchDay</h2>
-      <p>Enter your football-data.org API key to get live fixtures and real-time scores</p>
-      <input type="text" id="apiKeyInput" placeholder="Paste your API key here..." autocomplete="off" aria-label="API key" />
-      <button id="saveApiKey" class="btn-primary">Save & Start</button>
-      <a href="https://www.football-data.org/client/register" target="_blank" rel="noopener noreferrer" class="link-subtle">Get a free API key →</a>
+      <div class="overlay-icon" aria-hidden="true">&#x26BD;</div>
+      <h2 id="apiKeyHeading">Welcome to <span>MatchDay</span></h2>
+      <p id="apiKeyDesc">Choose your football data provider and enter your API key to get live fixtures</p>
+
+      <div class="setup-provider-toggle" role="group" aria-label="API Provider">
+        <button type="button" class="setup-provider-btn active" id="setupProviderOpenFoot" data-provider="openfoot">OpenFootAPI</button>
+        <button type="button" class="setup-provider-btn" id="setupProviderFD" data-provider="football_data">Football-Data.org</button>
+      </div>
+
+      <input type="text" id="apiKeyInput" placeholder="Paste your OpenFootAPI key..." autocomplete="off" aria-label="API key" />
+      <p id="apiKeyError" style="color:#ff6b6b;font-size:12px;margin:6px 0 0;min-height:16px;"></p>
+      <button id="saveApiKey" class="btn-primary">Save &amp; Start</button>
+      <a id="setupApiKeyLink" href="https://openfootapi.com" target="_blank" rel="noopener noreferrer" class="link-subtle">Get a free OpenFootAPI key here &#x2192;</a>
     </div>
   </div>
 
@@ -25,8 +32,8 @@
     <header class="header">
       <div class="header-left">
         <div class="logo">
-          <span class="logo-icon" aria-hidden="true">⚽</span>
-          <span class="logo-text">MatchDay</span>
+          <span class="logo-icon" aria-hidden="true">&#x26BD;</span>
+          <span class="logo-text">Match<span>Day</span></span>
         </div>
       </div>
       <div class="header-right">
@@ -81,7 +88,7 @@
           <button class="filter-chip live-chip dim-when-zero" data-filter="live" id="filterLive" aria-pressed="false" title="Filter live matches">
             <span class="live-dot-mini" aria-hidden="true"></span>Live<span id="liveBadgeCount" class="chip-count hidden">0</span>
           </button>
-          <button class="filter-chip" data-filter="followed" id="filterFollowed" aria-pressed="false">⭐ My Teams</button>
+          <button class="filter-chip" data-filter="followed" id="filterFollowed" aria-pressed="false">&#x2B50; My Teams</button>
         </div>
 
         <div id="matchesList" class="matches-list" role="feed" aria-live="polite">

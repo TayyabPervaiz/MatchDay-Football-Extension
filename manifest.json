@@ -1,12 +1,18 @@
 {
   "manifest_version": 3,
   "name": "MatchDay - Football Fixtures",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Track upcoming football matches from top leagues worldwide. Follow your favorite clubs and never miss a game.",
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "notifications"],
   "host_permissions": [
+    "https://openfootapi.com/*",
     "https://api.football-data.org/*",
+    "https://a.espncdn.com/*",
+    "https://www.thesportsdb.com/*",
+    "https://r2.thesportsdb.com/*",
     "https://vipbox.ga/*",
+    "https://vipbox.lc/*",
+    "https://vipbox.be/*",
     "https://hoofoot.net/*"
   ],
   "browser_specific_settings": {
@@ -29,7 +35,6 @@
     "128": "icons/icon128.png"
   },
   "background": {
-    "scripts": ["background.js"],
     "service_worker": "background.js"
   },
   "options_ui": {

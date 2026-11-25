@@ -10,18 +10,36 @@
     <div class="settings-container">
         <header class="settings-header">
             <div class="settings-logo">
-                <span>⚽</span>
-                <h1>MatchDay Settings</h1>
+                <span>&#x26BD;</span>
+                <h1>Match<em>Day</em> Settings</h1>
             </div>
             <p class="settings-subtitle">Configure your football fixtures and API preferences</p>
         </header>
 
-        <!-- API Key Section -->
+        <!-- API Provider & Key Section -->
         <section class="settings-section">
-            <h2>🔑 API Key</h2>
-            <p class="section-desc">Your football-data.org API key is required to fetch official match fixtures and scores.</p>
-            <div class="input-group">
-                <input type="password" id="apiKeyField" placeholder="Enter your API key..." autocomplete="off" />
+            <h2>&#x1F511; Data Provider &amp; API Key</h2>
+            <p class="section-desc">Select your preferred football data provider and configure your API key.</p>
+
+            <div class="provider-selector" role="radiogroup" aria-label="API Provider">
+                <label class="provider-radio active" id="providerOpenFootLabel">
+                    <input type="radio" name="apiProvider" value="openfoot" id="providerOpenFoot" checked />
+                    <div class="provider-info">
+                        <span class="provider-title">OpenFootAPI <span class="badge-recommended">Recommended</span></span>
+                        <span class="provider-meta">5,000 req/mo · 60 req/min · High quota</span>
+                    </div>
+                </label>
+                <label class="provider-radio" id="providerFootballDataLabel">
+                    <input type="radio" name="apiProvider" value="football_data" id="providerFootballData" />
+                    <div class="provider-info">
+                        <span class="provider-title">Football-Data.org (OG)</span>
+                        <span class="provider-meta">10 req/min · Tier 4 · Classic provider</span>
+                    </div>
+                </label>
+            </div>
+
+            <div class="input-group" style="margin-top: 14px;">
+                <input type="password" id="apiKeyField" placeholder="Enter your OpenFootAPI key..." autocomplete="off" />
                 <button id="toggleApiKey" class="btn-icon" title="Show/Hide Key" aria-label="Toggle visibility">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
@@ -30,47 +48,55 @@
                 </button>
             </div>
             <div class="button-row">
-                <button id="saveApiKeyBtn" class="btn-primary">Save API Key</button>
+                <button id="saveApiKeyBtn" class="btn-primary">Save &amp; Apply</button>
                 <button id="testApiKeyBtn" class="btn-secondary">Test Connection</button>
-                <button id="clearApiKeyBtn" class="btn-ghost">Clear</button>
+                <button id="clearApiKeyBtn" class="btn-ghost">Clear Key</button>
                 <span id="apiKeyStatus" class="status-msg"></span>
             </div>
-            <a href="https://www.football-data.org/client/register" target="_blank" rel="noopener noreferrer" class="link-help">Don't have a key? Get a free API key here →</a>
+            <a id="getApiKeyLink" href="https://openfootapi.com" target="_blank" rel="noopener noreferrer" class="link-help">Don't have a key? Get a free OpenFootAPI key here &#x2192;</a>
+        </section>
+
+        <!-- Stream Sources Section (Improvement 1: configurable domains) -->
+        <section class="settings-section">
+            <h2>&#x1F4FA; Stream &amp; Highlights Sources</h2>
+            <p class="section-desc">These sites can change domains. Update the base URLs here if stream or highlights links stop working — no reinstall needed.</p>
+
+            <label style="display:block;font-size:12px;color:var(--text-secondary,#aaa);margin-bottom:4px;">Live Streams Base URL (VIPBox)</label>
+            <div class="input-group" style="margin-bottom:10px;">
+                <input type="text" id="vipboxBaseField" placeholder="https://vipbox.ga" autocomplete="off" />
+            </div>
+
+            <label style="display:block;font-size:12px;color:var(--text-secondary,#aaa);margin-bottom:4px;">Highlights Base URL (HooFoot)</label>
+            <div class="input-group" style="margin-bottom:10px;">
+                <input type="text" id="hoofootBaseField" placeholder="https://hoofoot.net" autocomplete="off" />
+            </div>
+
+            <div class="button-row">
+                <button id="saveSourcesBtn" class="btn-primary">Save Sources</button>
+                <button id="resetSourcesBtn" class="btn-ghost">Reset to Defaults</button>
+                <span id="sourcesStatus" class="status-msg"></span>
+            </div>
         </section>
 
         <!-- Cache Section -->
         <section class="settings-section">
-            <h2>🗄️ Cache Management</h2>
-            <p class="section-desc">Match schedules are cached locally to minimize requests against the 10 requests/min free tier limit.</p>
+            <h2>&#x1F5C4;&#xFE0F; Cache Management</h2>
+            <p class="section-desc">Match schedules are cached locally to minimise API quota usage. Clear if you see stale or incorrect data.</p>
             <div class="button-row">
                 <button id="clearCacheBtn" class="btn-secondary">Clear Cache</button>
                 <span id="cacheStatus" class="status-msg"></span>
             </div>
         </section>
 
-        <!-- Streaming & Highlights Section -->
-        <section class="settings-section">
-            <h2>📺 Live Streams & Highlights</h2>
-            <p class="section-desc">MatchDay automatically maps direct links for every match:</p>
-            <div class="about-info">
-                <div class="about-row">
-                    <span>Live Match Streams</span>
-                    <span>VIPBox (<a href="https://vipbox.ga/football-schedule" target="_blank" rel="noopener noreferrer" class="link-inline">vipbox.ga</a>)</span>
-                </div>
-                <div class="about-row">
-                    <span>Full Match Highlights</span>
-                    <span>HooFoot (<a href="https://hoofoot.net/" target="_blank" rel="noopener noreferrer" class="link-inline">hoofoot.net</a>)</span>
-                </div>
-            </div>
-        </section>
-
         <!-- About Section -->
         <section class="settings-section">
-            <h2>ℹ️ About MatchDay</h2>
+            <h2>&#x2139;&#xFE0F; About MatchDay</h2>
             <div class="about-info">
-                <div class="about-row"><span>Version</span><span>1.0.0 (Manifest V3)</span></div>
-                <div class="about-row"><span>Data Source</span><span>football-data.org REST API</span></div>
-                <div class="about-row"><span>Free Tier Quota</span><span>10 requests / minute</span></div>
+                <div class="about-row"><span>Version</span><span>1.1.0 (Manifest V3)</span></div>
+                <div class="about-row"><span>Data Source</span><span>OpenFootAPI (openfootapi.com)</span></div>
+                <div class="about-row"><span>Free Tier Quota</span><span>5,000 requests / month · 60 req/min</span></div>
+                <div class="about-row"><span>Live Streams</span><span>VIPBox</span></div>
+                <div class="about-row"><span>Highlights</span><span>HooFoot</span></div>
             </div>
         </section>
     </div>
