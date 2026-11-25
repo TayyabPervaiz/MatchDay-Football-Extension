@@ -19,7 +19,7 @@
         <!-- API Provider & Key Section -->
         <section class="settings-section">
             <h2>&#x1F511; Data Provider &amp; API Key</h2>
-            <p class="section-desc">Select your preferred football data provider and configure your API key.</p>
+            <p class="section-desc">Select OpenFootAPI or Football-Data.org. Keys are stored per provider; switching providers keeps their keys separate and updates the legacy active key.</p>
 
             <div class="provider-selector" role="radiogroup" aria-label="API Provider">
                 <label class="provider-radio active" id="providerOpenFootLabel">
@@ -59,16 +59,16 @@
         <!-- Stream Sources Section (Improvement 1: configurable domains) -->
         <section class="settings-section">
             <h2>&#x1F4FA; Stream &amp; Highlights Sources</h2>
-            <p class="section-desc">These sites can change domains. Update the base URLs here if stream or highlights links stop working — no reinstall needed.</p>
+            <p class="section-desc">Use HTTPS on the supported VIPBox hosts (vipbox.ga, vipbox.lc, vipbox.be) and HooFoot host (hoofoot.net). Match links appear only when a concrete match-specific URL is found.</p>
 
             <label style="display:block;font-size:12px;color:var(--text-secondary,#aaa);margin-bottom:4px;">Live Streams Base URL (VIPBox)</label>
             <div class="input-group" style="margin-bottom:10px;">
-                <input type="text" id="vipboxBaseField" placeholder="https://vipbox.ga" autocomplete="off" />
+                <input type="url" id="vipboxBaseField" placeholder="https://vipbox.ga" autocomplete="off" />
             </div>
 
             <label style="display:block;font-size:12px;color:var(--text-secondary,#aaa);margin-bottom:4px;">Highlights Base URL (HooFoot)</label>
             <div class="input-group" style="margin-bottom:10px;">
-                <input type="text" id="hoofootBaseField" placeholder="https://hoofoot.net" autocomplete="off" />
+                <input type="url" id="hoofootBaseField" placeholder="https://hoofoot.net" autocomplete="off" />
             </div>
 
             <div class="button-row">
@@ -93,7 +93,7 @@
             <h2>&#x2139;&#xFE0F; About MatchDay</h2>
             <div class="about-info">
                 <div class="about-row"><span>Version</span><span>1.1.0 (Manifest V3)</span></div>
-                <div class="about-row"><span>Data Source</span><span>OpenFootAPI (openfootapi.com)</span></div>
+                <div class="about-row"><span>Supported Providers</span><span>OpenFootAPI, Football-Data.org</span></div>
                 <div class="about-row"><span>Free Tier Quota</span><span>5,000 requests / month · 60 req/min</span></div>
                 <div class="about-row"><span>Live Streams</span><span>VIPBox</span></div>
                 <div class="about-row"><span>Highlights</span><span>HooFoot</span></div>
@@ -101,6 +101,7 @@
         </section>
     </div>
 
+    <script src="storage.js"></script>
     <script src="settings.js"></script>
 </body>
 </html>

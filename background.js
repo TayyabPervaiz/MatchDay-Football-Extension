@@ -3,36 +3,31 @@
    Multi-API Architecture:
      1. OpenFootAPI (openfootapi.com)
      2. Football-Data.org (api.football-data.org)
-   Robust Caching, Rate-Limit Defense & Inferred Match Lifecycle
+   Provider-Scoped Caching, Rate-Limit Defense & Confirmed Match Lifecycle
    ═══════════════════════════════════════════ */
 
 try {
+  importScripts('storage.js');
   importScripts('crests.js');
 } catch (e) {
-  console.warn('Failed to load bundled crests:', e);
+  console.warn('Failed to load shared settings or bundled crests:', e);
 }
 
 const PROVIDERS = {
   openfoot: {
     id: 'openfoot',
     name: 'OpenFootAPI',
-    baseUrl: 'https://openfootapi.com/v1',
-    storageKey: 'apiKey_openfoot'
+    baseUrl: 'https://openfootapi.com/v1'
   },
   football_data: {
     id: 'football_data',
     name: 'Football-Data.org',
-    baseUrl: 'https://api.football-data.org/v4',
-    storageKey: 'apiKey_footballdata'
+    baseUrl: 'https://api.football-data.org/v4'
   }
 };
 
 async function getActiveProvider() {
-  const data = await chrome.storage.local.get(['apiProvider', 'apiKey_openfoot', 'apiKey_footballdata', 'apiKey']);
-  const provider = data.apiProvider || 'openfoot';
-  const apiKey = (provider === 'openfoot')
-    ? (data.apiKey_openfoot || data.apiKey || '')
-    : (data.apiKey_footballdata || data.apiKey || '');
+  const { provider, apiKey } = await MatchDayStorage.getSettings();
   return { provider, apiKey };
 }
 
@@ -294,6 +289,7 @@ function slugMatchScore(slug, homeToks, awayToks) {
   const homeHits = homeToks.filter(t => s.includes(t)).length;
   const awayHits = awayToks.filter(t => s.includes(t)).length;
   if (!homeToks.length || !awayToks.length) return 0;
+  if (!homeHits || !awayHits) return 0;
   return (homeHits / homeToks.length) + (awayHits / awayToks.length);
 }
 
@@ -341,7 +337,9 @@ async function setCache(key, value) {
     if (bytesUsed > 8 * 1024 * 1024) {
       const all = await chrome.storage.local.get(null);
       const evictable = Object.keys(all)
-        .filter(k => k.startsWith('date_') || k.startsWith('comp_') || k.startsWith('hoofoot_index_') || k.startsWith('crests_league_'))
+        .filter(k => k.startsWith('date_') || k.startsWith('comp_') ||
+          k.startsWith('matches_') || k.startsWith('master_matches_') ||
+          k.startsWith('hoofoot_index_') || k.startsWith('crests_league_'))
         .sort((a, b) => (all[a]?.timestamp || 0) - (all[b]?.timestamp || 0));
       if (evictable.length > 0) {
         await chrome.storage.local.remove(evictable.slice(0, Math.ceil(evictable.length / 2)));
@@ -354,8 +352,9 @@ async function setCache(key, value) {
 
 // ── Sync Live Schedule from VIPBox ───────
 async function getVipboxSchedule() {
-  const { vipboxBase = 'https://vipbox.ga' } = await chrome.storage.local.get('vipboxBase');
-  const cacheKey = 'vipbox_schedule';
+  const { vipboxBase } = await MatchDayStorage.getSettings();
+  const sourceHost = new URL(vipboxBase).host;
+  const cacheKey = `vipbox_schedule_${sourceHost}`;
   const cached = await getCachedWithStale(cacheKey, 10 * 60 * 1000);
   if (cached && !cached.isStale && cached.value) return cached.value;
 
@@ -373,7 +372,10 @@ async function getVipboxSchedule() {
     for (const regex of patterns) {
       let m;
       while ((m = regex.exec(html)) !== null) {
-        list.push({ url: `${vipboxBase}${m[1]}`, slug: m[2] });
+        const url = new URL(m[1], vipboxBase).href;
+        if (MatchDayStorage.isAllowedMatchUrl('vipbox', url, vipboxBase)) {
+          list.push({ url, slug: m[2] });
+        }
       }
       if (list.length > 0) break;
     }
@@ -395,8 +397,9 @@ async function getVipboxSchedule() {
 
 // ── Fetch & Cache HooFoot League Index ───
 async function getHoofootLeagueIndex(leagueSlug) {
-  const { hoofootBase = 'https://hoofoot.net' } = await chrome.storage.local.get('hoofootBase');
-  const cacheKey = `hoofoot_index_${leagueSlug}`;
+  const { hoofootBase } = await MatchDayStorage.getSettings();
+  const sourceHost = new URL(hoofootBase).host;
+  const cacheKey = `hoofoot_index_${sourceHost}_${leagueSlug}`;
   const cached = await getCachedWithStale(cacheKey, HOOFOOT_INDEX_TTL);
   if (cached && !cached.isStale && cached.value) return cached.value;
 
@@ -416,7 +419,10 @@ async function getHoofootLeagueIndex(leagueSlug) {
       if (!href.startsWith(prefix)) continue;
       const after = href.slice(prefix.length).replace(/\/$/, '');
       if (!after || after.includes('/')) continue;
-      articles.push({ url: `${hoofootBase}${href}`, slug: after });
+      const url = new URL(href, hoofootBase).href;
+      if (MatchDayStorage.isAllowedMatchUrl('hoofoot', url, hoofootBase)) {
+        articles.push({ url, slug: after });
+      }
     }
     const seen = new Set();
     const unique = articles.filter(a => {
@@ -434,7 +440,6 @@ async function getHoofootLeagueIndex(leagueSlug) {
 
 // ── Find Best HooFoot Highlights URL ─────
 async function findHoofootUrl(homeTeam, awayTeam, leagueSlug, matchDate) {
-  const { hoofootBase = 'https://hoofoot.net' } = await chrome.storage.local.get('hoofootBase');
   const months = ['january','february','march','april','may','june',
                   'july','august','september','october','november','december'];
   const d = new Date(matchDate);
@@ -460,20 +465,18 @@ async function findHoofootUrl(homeTeam, awayTeam, leagueSlug, matchDate) {
       const score = slugMatchScore(article.slug, homeToks, awayToks);
       if (score > bestScore) { bestScore = score; best = article; }
     }
-    if (best && bestScore >= 1.0) return best.url;
+    if (best && bestScore >= 1.0 &&
+        MatchDayStorage.isAllowedMatchUrl('hoofoot', best.url)) return best.url;
   }
 
-  // Fallback: construct likely URL
-  const homeSlug = slugify(homeTeam);
-  const awaySlug = slugify(awayTeam);
-  return `${hoofootBase}/full-matches/${leagueSlug}/${homeSlug}-vs-${awaySlug}-highlights-${monthName}-${dayStr}-${yearStr}/`;
+  return null;
 }
 
 // ── Normalize Match: Football-Data.org format ─────────────────────────
 function normalizeFootballDataMatch(raw) {
   const code = raw.competition?.code || '';
   const leagueMeta = LEAGUES[code] || {};
-  const status = (raw.status || 'SCHEDULED').toUpperCase();
+  const status = (raw.status || 'UNKNOWN').toUpperCase();
   const score = raw.score || {};
   const ft = score.fullTime || {};
   const ht = score.halfTime || {};
@@ -522,18 +525,19 @@ function normalizeMatch(raw) {
   const code = API_ID_TO_CODE[compApiId] || compApiId;
   const leagueMeta = LEAGUES[code] || {};
 
-  // Map API lowercase status → our UPPER_CASE convention
+  // Map only explicit API statuses; kickoff time does not change match state.
   const statusRaw = (raw.status || '').toLowerCase();
-  const period    = (raw.period  || '').toUpperCase(); // "FT", "1H", "2H", "HT", ""
+  const period = (raw.period || '').toUpperCase();
   let status;
-  if (statusRaw === 'finished' || period === 'FT')      status = 'FINISHED';
+  if (statusRaw === 'finished') status = 'FINISHED';
   else if (statusRaw === 'live' || statusRaw === 'in_play') status = 'IN_PLAY';
-  else if (period === 'HT')                              status = 'PAUSED';
   else if (statusRaw === 'paused' || statusRaw === 'halftime') status = 'PAUSED';
-  else if (statusRaw === 'postponed')                   status = 'POSTPONED';
+  else if (statusRaw === 'postponed') status = 'POSTPONED';
   else if (statusRaw === 'cancelled' || statusRaw === 'canceled') status = 'CANCELLED';
-  else if (statusRaw === 'suspended')                   status = 'SUSPENDED';
-  else                                                  status = 'SCHEDULED';
+  else if (statusRaw === 'suspended') status = 'SUSPENDED';
+  else if (statusRaw === 'timed') status = 'TIMED';
+  else if (['scheduled', 'upcoming', 'not_started'].includes(statusRaw)) status = 'SCHEDULED';
+  else status = statusRaw ? statusRaw.toUpperCase() : 'UNKNOWN';
 
   // Real score schema: { home: number|null, away: number|null }  (no halfTime sub-object)
   const score = raw.score || {};
@@ -574,8 +578,8 @@ function normalizeMatch(raw) {
   };
 }
 
-// ── Enrich Match with Media Links & Inferred Lapsed Status ──
-async function enrichMatch(m, vipSchedule = []) {
+// ── Enrich matches without inferring their provider-reported status ──
+async function enrichMatch(m, vipSchedule = [], settings) {
   const code = m.competition?.code;
   const leagueMeta = LEAGUES[code] || {};
   const homeTeam = m.homeTeam || {};
@@ -591,29 +595,14 @@ async function enrichMatch(m, vipSchedule = []) {
   const nowMs     = Date.now();
   const elapsedMs = nowMs - matchTime;
   const elapsedMins = Math.floor(elapsedMs / (60 * 1000));
+  const status = m.status;
+  const isFinished = status === 'FINISHED';
+  const isLive = status === 'IN_PLAY' || status === 'PAUSED';
+  const isScheduled = status === 'SCHEDULED' || status === 'TIMED';
+  const elapsedSinceKickoffMins = isScheduled && elapsedMins >= 0 ? elapsedMins : null;
 
-  let status    = m.status;
-  let isFinished = (status === 'FINISHED');
-  let isLive     = (status === 'IN_PLAY' || status === 'PAUSED');
-
-  // ── Fix B1: Lapsed-match inference — only for statuses that can go live ──
-  // POSTPONED / CANCELLED / SUSPENDED are never inferred as live.
-  let isInferredLive = false;
-  const canInfer = ['SCHEDULED', 'TIMED'].includes(status);
-  if (canInfer && !isFinished && !isLive) {
-    if (elapsedMins > 115) {
-      status = 'FINISHED';
-      isFinished = true;
-    } else if (elapsedMins >= 0 && elapsedMins <= 115) {
-      status = 'IN_PLAY';
-      isLive = true;
-      isInferredLive = true; // flag: popup shows "~LIVE" caveat
-    }
-  }
-
-  // 1. VIPBox Direct Match Stream URL (fuzzy match from schedule)
-  const { vipboxBase = 'https://vipbox.ga' } = await chrome.storage.local.get('vipboxBase');
-  let liveStreamUrl = `${vipboxBase}/onair/football/${homeSlug}-vs-${awaySlug}`;
+  // Only a URL found in the fetched schedule is a valid match-specific link.
+  let liveStreamUrl = null;
   if (vipSchedule && vipSchedule.length > 0) {
     const homeToks = teamTokens(homeName);
     const awayToks = teamTokens(awayName);
@@ -623,57 +612,53 @@ async function enrichMatch(m, vipSchedule = []) {
       const score = slugMatchScore(v.slug, homeToks, awayToks);
       if (score > bestScore) { bestScore = score; best = v; }
     }
-    if (best && bestScore >= 1.0) liveStreamUrl = best.url;
+    if (best && bestScore >= 1.0 &&
+        MatchDayStorage.isAllowedMatchUrl('vipbox', best.url, settings.vipboxBase)) {
+      liveStreamUrl = best.url;
+    }
   }
 
   // 2. HooFoot Full Match Highlights URL
   const leagueSlug = leagueMeta.hoofootSlug || 'premier-league';
   let highlightsUrl = null;
 
-  if (isFinished || elapsedMins > 105) {
+  if (isFinished) {
     highlightsUrl = await findHoofootUrl(homeName, awayName, leagueSlug, m.utcDate);
-    if (highlightsUrl && !isFinished) {
-      status = 'FINISHED';
-      isFinished = true;
-    }
   }
-
-  // ── Fix B6: League highlights fallback URL (Fix B11) ──
-  const { hoofootBase = 'https://hoofoot.net' } = await chrome.storage.local.get('hoofootBase');
-  const leagueHighlightsPage = highlightsUrl
-    || (leagueMeta.hoofootSlug ? `${hoofootBase}/full-matches/${leagueMeta.hoofootSlug}/` : null);
 
   return {
     ...m,
-    status,
+    provider: settings.provider,
+    homeTeam: { ...homeTeam, provider: settings.provider },
+    awayTeam: { ...awayTeam, provider: settings.provider },
     isFinished,
     isLive,
-    isInferredLive,
-    elapsedMins: isLive ? Math.min(Math.max(elapsedMins, 1), 90) : null,
+    elapsedMins: elapsedSinceKickoffMins,
     competitionCode:  code,
     competitionName:  leagueMeta.name || m.competition?.name || 'Unknown League',
     competitionEmoji: leagueMeta.emoji || '⚽',
     hoofootSlug:      leagueMeta.hoofootSlug || null,
     liveStreamUrl,
     highlightsUrl,
-    leagueHighlightsPage,
     homeSlug,
     awaySlug
   };
 }
 
 // ── Fetch Matches via Football-Data.org (OG Provider) ──────────────────────
-async function fetchMatchesFootballData(dateFrom, dateTo, comps) {
+async function fetchMatchesFootballData(dateFrom, dateTo, comps, options = {}) {
   const { apiFrom, apiTo, isTruncated } = getUtcRangeForLocalDate(dateFrom, dateTo);
+  const { provider } = await getActiveProvider();
   let rawMatches = [];
   let anyRateLimited = false;
+  let anyFetchError = false;
 
   for (let i = 0; i < comps.length; i++) {
     const code = comps[i];
-    const compCacheKey = `comp_${code}_${apiFrom}_${apiTo}`;
+    const compCacheKey = `matches_${provider}_comp_${code}_${apiFrom}_${apiTo}`;
     const cached = await getCachedWithStale(compCacheKey, MATCHES_CACHE_TTL);
 
-    if (cached && !cached.isStale && cached.value) {
+    if (!options.forceRefresh && cached && !cached.isStale && cached.value) {
       rawMatches.push(...cached.value);
       continue;
     }
@@ -692,16 +677,18 @@ async function fetchMatchesFootballData(dateFrom, dateTo, comps) {
       rawMatches.push(...matches);
     } catch (err) {
       console.warn(`FD fetch failed for ${code}:`, err.message);
+      anyFetchError = true;
       if (err.message === 'RATE_LIMIT') anyRateLimited = true;
       if (cached?.value?.length > 0) rawMatches.push(...cached.value);
     }
   }
 
-  return { rawMatches, anyRateLimited, isTruncated };
+  return { rawMatches, anyRateLimited, anyFetchError, isTruncated };
 }
 
 // ── Fetch Matches via OpenFootAPI (Date-based) ─────────────────────────────
-async function fetchMatchesOpenFoot(dateFrom, dateTo, comps) {
+async function fetchMatchesOpenFoot(dateFrom, dateTo, comps, options = {}) {
+  const { provider } = await getActiveProvider();
   const datesToFetch = [];
   const start = new Date(dateFrom + 'T00:00:00');
   const end   = new Date(dateTo   + 'T00:00:00');
@@ -716,12 +703,13 @@ async function fetchMatchesOpenFoot(dateFrom, dateTo, comps) {
 
   let rawMatches = [];
   let anyRateLimited = false;
+  let anyFetchError = false;
 
   for (const dateStr of datesToFetch) {
-    const dateCacheKey = `date_${dateStr}`;
+    const dateCacheKey = `matches_${provider}_date_${dateStr}`;
     const cached = await getCachedWithStale(dateCacheKey, MATCHES_CACHE_TTL);
 
-    if (cached && !cached.isStale && cached.value) {
+    if (!options.forceRefresh && cached && !cached.isStale && cached.value) {
       rawMatches.push(...cached.value);
       continue;
     }
@@ -734,36 +722,40 @@ async function fetchMatchesOpenFoot(dateFrom, dateTo, comps) {
       rawMatches.push(...normalized);
     } catch (err) {
       console.warn(`OF fetch failed for date ${dateStr}:`, err.message);
+      anyFetchError = true;
       if (err.message === 'RATE_LIMIT') anyRateLimited = true;
       if (cached?.value?.length > 0) rawMatches.push(...cached.value);
     }
   }
 
-  return { rawMatches, anyRateLimited, isTruncated };
+  return { rawMatches, anyRateLimited, anyFetchError, isTruncated };
 }
 
 // ── Main Multi-Provider Match Fetcher ─────────────────────────────────────
-async function fetchMatches(dateFrom, dateTo, competitions = []) {
+async function fetchMatches(dateFrom, dateTo, competitions = [], options = {}) {
   const comps = (competitions && competitions.length > 0)
     ? competitions
     : ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'];
 
   const { provider } = await getActiveProvider();
-  const masterKey = `master_matches_${provider}_${dateFrom}_${dateTo}`;
+  const masterKey = `master_matches_${provider}_${dateFrom}_${dateTo}_${[...comps].sort().join(',')}`;
 
   let rawMatches = [];
   let anyRateLimited = false;
+  let anyFetchError = false;
   let isTruncated = false;
 
   if (provider === 'football_data') {
-    const fdRes = await fetchMatchesFootballData(dateFrom, dateTo, comps);
+    const fdRes = await fetchMatchesFootballData(dateFrom, dateTo, comps, options);
     rawMatches = fdRes.rawMatches;
     anyRateLimited = fdRes.anyRateLimited;
+    anyFetchError = fdRes.anyFetchError;
     isTruncated = fdRes.isTruncated;
   } else {
-    const ofRes = await fetchMatchesOpenFoot(dateFrom, dateTo, comps);
+    const ofRes = await fetchMatchesOpenFoot(dateFrom, dateTo, comps, options);
     rawMatches = ofRes.rawMatches;
     anyRateLimited = ofRes.anyRateLimited;
+    anyFetchError = ofRes.anyFetchError;
     isTruncated = ofRes.isTruncated;
   }
 
@@ -774,8 +766,9 @@ async function fetchMatches(dateFrom, dateTo, competitions = []) {
   const seenIds = new Set();
   filtered = filtered.filter(m => {
     if (!m.id) return true;
-    if (seenIds.has(m.id)) return false;
-    seenIds.add(m.id);
+    const identity = `${provider}:${m.id}`;
+    if (seenIds.has(identity)) return false;
+    seenIds.add(identity);
     return true;
   });
 
@@ -784,15 +777,22 @@ async function fetchMatches(dateFrom, dateTo, competitions = []) {
 
   // Step 6: Enrich with VIPBox & HooFoot URLs
   const vipSchedule = await getVipboxSchedule();
-  const enriched = await Promise.all(filtered.map(m => enrichMatch(m, vipSchedule)));
+  const settings = await MatchDayStorage.getSettings();
+  const enriched = await Promise.all(filtered.map(m => enrichMatch(m, vipSchedule, settings)));
 
   // Master fallback cache
-  if (enriched.length > 0) {
+  if (enriched.length > 0 || options.forceRefresh) {
     await setCache(masterKey, enriched);
   } else {
     const masterFallback = await getCachedWithStale(masterKey, STALE_FALLBACK_TTL);
     if (masterFallback?.value?.length > 0) {
-      return { matches: masterFallback.value, isRateLimited: anyRateLimited, isStale: true, isTruncated };
+      return {
+        matches: masterFallback.value,
+        isRateLimited: anyRateLimited,
+        isStale: true,
+        hasFetchError: anyFetchError,
+        isTruncated
+      };
     }
   }
 
@@ -809,7 +809,13 @@ async function fetchMatches(dateFrom, dateTo, competitions = []) {
     return new Date(a.utcDate) - new Date(b.utcDate);
   });
 
-  return { matches: enriched, isRateLimited: anyRateLimited, isStale: anyRateLimited, isTruncated };
+  return {
+    matches: enriched,
+    isRateLimited: anyRateLimited,
+    isStale: anyRateLimited || anyFetchError,
+    hasFetchError: anyFetchError,
+    isTruncated
+  };
 }
 
 // ── Fetch Teams for a Competition ────────
@@ -817,13 +823,15 @@ async function fetchTeams(competitionCode) {
   const { provider } = await getActiveProvider();
   const cacheKey = `teams_${provider}_${competitionCode}`;
   const cached = await getCachedWithStale(cacheKey, TEAMS_CACHE_TTL);
-  if (cached && !cached.isStale && cached.value) return cached.value;
+  const withProvider = teams => teams.map(team => ({ ...team, provider }));
+  if (cached && !cached.isStale && cached.value) return withProvider(cached.value);
 
   if (provider === 'football_data') {
     try {
       const data = await apiFetch(`/competitions/${competitionCode}/teams`);
       const teams = (data.teams || []).map(t => ({
         id:              t.id,
+        provider,
         name:            t.name || '',
         shortName:       t.shortName || t.tla || t.name || '',
         tla:             t.tla || '',
@@ -835,7 +843,7 @@ async function fetchTeams(competitionCode) {
       return teams;
     } catch (e) {
       console.warn(`Failed to fetch teams for ${competitionCode} via FD:`, e.message);
-      return cached?.value || [];
+      return withProvider(cached?.value || []);
     }
   }
 
@@ -855,6 +863,7 @@ async function fetchTeams(competitionCode) {
         if (side?.id && !teamMap.has(side.id)) {
           teamMap.set(side.id, {
             id:              side.id,
+            provider,
             name:            side.name || '',
             shortName:       side.shortName || side.code || side.name || '',
             tla:             side.code || side.tla || '',
@@ -870,60 +879,61 @@ async function fetchTeams(competitionCode) {
     return teams;
   } catch (e) {
     console.warn(`Failed to fetch teams for ${competitionCode}:`, e.message);
-    return cached?.value || [];
+    return withProvider(cached?.value || []);
   }
 }
 
-// ── Search Teams via /v1/search ───────────
-// Falls back to scanning cached teams if search returns too few results.
+// Football-Data.org supports competition team lists; OpenFootAPI has /search.
 async function searchTeams(query, selectedLeagues) {
-  if (!query) {
-    // No query — return all cached teams across selected leagues
-    const all = [];
-    for (const code of selectedLeagues) {
-      const teams = await fetchTeams(code);
-      all.push(...teams);
+  const { provider } = await getActiveProvider();
+  const allTeams = [];
+  for (const code of selectedLeagues) {
+    try {
+      allTeams.push(...await fetchTeams(code));
+    } catch (error) {
+      console.warn(`Team list failed for ${code}:`, error.message);
     }
-    return all;
   }
+
+  const q = (query || '').trim().toLowerCase();
+  const cachedResults = () => q ? allTeams.filter(team =>
+    team.name?.toLowerCase().includes(q) ||
+    team.shortName?.toLowerCase().includes(q) ||
+    team.tla?.toLowerCase().includes(q)
+  ) : allTeams;
+
+  if (provider === 'football_data' || !q) return cachedResults();
 
   try {
     const res = await apiFetch('/search', { q: query });
     const results = (res?.data || [])
-      .filter(r => r.type === 'team')
-      .map(r => ({
-        id:              r.id,
-        name:            r.name || '',
-        shortName:       r.name || '',
-        tla:             '',
-        crest:           lookupCrest(r.name) || r.logoUrl || '',
+      .filter(result => result.type === 'team')
+      .map(result => ({
+        id: result.id,
+        provider,
+        name: result.name || '',
+        shortName: result.name || '',
+        tla: '',
+        crest: lookupCrest(result.name) || result.logoUrl || '',
         competitionCode: '',
-        competitionName: r.subtitle || ''
+        competitionName: result.subtitle || ''
       }));
-
-    if (results.length > 0) return results;
-  } catch (e) {
-    console.warn('Team search failed, falling back to cache:', e.message);
+    if (results.length) return [...new Map(
+      [...results, ...cachedResults()].map(team => [
+        MatchDayStorage.getTeamIdentity(team, provider),
+        team
+      ])
+    ).values()];
+  } catch (error) {
+    console.warn('Team search failed, falling back to competition cache:', error.message);
   }
-
-  // Fallback: filter from cached teams
-  const allTeams = [];
-  for (const code of selectedLeagues) {
-    const teams = await fetchTeams(code);
-    allTeams.push(...teams);
-  }
-  const q = query.toLowerCase();
-  return allTeams.filter(t =>
-    t.name?.toLowerCase().includes(q) ||
-    t.shortName?.toLowerCase().includes(q) ||
-    t.tla?.toLowerCase().includes(q)
-  );
+  return cachedResults();
 }
 
 // ── Update Toolbar Badge ──────────────────
 async function updateBadge() {
   try {
-    const { apiKey } = await chrome.storage.local.get('apiKey');
+    const { apiKey } = await getActiveProvider();
     if (!apiKey) { chrome.action.setBadgeText({ text: '' }); return; }
 
     const { selectedLeagues = ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'] } = await chrome.storage.local.get('selectedLeagues');
@@ -953,7 +963,6 @@ async function checkKickoffNotifications(matches) {
   const { followedTeams = [], notifiedMatches = [] } = await chrome.storage.local.get(['followedTeams', 'notifiedMatches']);
   if (!followedTeams.length) return;
 
-  const followedIds = new Set(followedTeams.map(t => t.id));
   const now = Date.now();
   const fifteenMins = 15 * 60 * 1000;
   const notifiedSet = new Set(notifiedMatches);
@@ -964,25 +973,29 @@ async function checkKickoffNotifications(matches) {
     const kickoff = new Date(match.utcDate).getTime();
     const timeUntil = kickoff - now;
     if (timeUntil < 0 || timeUntil > fifteenMins) continue;
-    if (notifiedSet.has(match.id)) continue;
+    const matchIdentity = `${match.provider || 'openfoot'}:${match.id}`;
+    if (notifiedSet.has(matchIdentity)) continue;
 
-    const homeId = match.homeTeam?.id;
-    const awayId = match.awayTeam?.id;
-    if (!followedIds.has(homeId) && !followedIds.has(awayId)) continue;
+    const homeIdentity = MatchDayStorage.getTeamIdentity(match.homeTeam, match.provider || 'openfoot');
+    const awayIdentity = MatchDayStorage.getTeamIdentity(match.awayTeam, match.provider || 'openfoot');
+    const followedIds = new Set(followedTeams.map(team =>
+      MatchDayStorage.getTeamIdentity(team, match.provider || 'openfoot')
+    ));
+    if (!followedIds.has(homeIdentity) && !followedIds.has(awayIdentity)) continue;
 
     const homeName = match.homeTeam?.shortName || match.homeTeam?.name || '?';
     const awayName = match.awayTeam?.shortName || match.awayTeam?.name || '?';
     const minsLeft = Math.ceil(timeUntil / 60000);
 
-    chrome.notifications?.create(`kickoff_${match.id}`, {
+    chrome.notifications?.create(`kickoff_${matchIdentity}`, {
       type:    'basic',
       iconUrl: 'icons/icon48.png',
       title:   '⚽ Kickoff Soon!',
       message: `${homeName} vs ${awayName} kicks off in ${minsLeft} min`
     });
 
-    newlyNotified.push(match.id);
-    notifiedSet.add(match.id);
+    newlyNotified.push(matchIdentity);
+    notifiedSet.add(matchIdentity);
   }
 
   if (newlyNotified.length > 0) {
@@ -998,7 +1011,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       switch (msg.type) {
         case 'GET_MATCHES': {
-          const res = await fetchMatches(msg.dateFrom, msg.dateTo, msg.competitions);
+          const res = await fetchMatches(msg.dateFrom, msg.dateTo, msg.competitions, {
+            forceRefresh: msg.forceRefresh === true
+          });
           sendResponse({
             success: true,
             data: res.matches,
@@ -1023,13 +1038,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         case 'REFRESH': {
+          if (msg.dateFrom && msg.dateTo && Array.isArray(msg.competitions)) {
+            const res = await fetchMatches(msg.dateFrom, msg.dateTo, msg.competitions, {
+              forceRefresh: true
+            });
+            sendResponse({
+              success: true,
+              data: res.matches,
+              isRateLimited: res.isRateLimited,
+              isStale: res.isStale,
+              isTruncated: res.isTruncated
+            });
+            break;
+          }
+          const { provider } = await getActiveProvider();
           const storage = await chrome.storage.local.get(null);
           const matchKeys = Object.keys(storage).filter(k =>
-            k.startsWith('date_') ||
-            k.startsWith('comp_') ||
-            k.startsWith('master_matches_') ||
-            k.startsWith('matches_') ||
-            k === 'vipbox_schedule' ||
+            k.startsWith(`master_matches_${provider}_`) ||
+            k.startsWith(`matches_${provider}_`) ||
+            k.startsWith('vipbox_schedule_') ||
             k.startsWith('hoofoot_index_')
           );
           await chrome.storage.local.remove(matchKeys);
@@ -1067,6 +1094,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
+  await MatchDayStorage.getSettings();
   const storage = await chrome.storage.local.get(null);
   const staleKeys = Object.keys(storage).filter(k =>
     k.startsWith('date_') ||

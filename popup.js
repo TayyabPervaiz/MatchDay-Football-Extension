@@ -15,6 +15,10 @@ let currentMatches = [];
 let collapsedLeagues = new Set();
 let lastFetchTimestamp = null;
 let lastLiveRefresh = 0;
+let activeProvider = MatchDayStorage.DEFAULT_PROVIDER;
+let sourceBases = MatchDayStorage.DEFAULT_SOURCES;
+let searchRequestId = 0;
+const targetedFetches = new Set();
 const teamsCache = new Map(); // In-memory lookup
 
 // ── DOM Refs ────────────────────────────
@@ -38,6 +42,29 @@ const liveBadgeCount = $('#liveBadgeCount');
 const filterLiveBtn = $('#filterLive');
 
 const CREST_FALLBACK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23333'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3C/svg%3E";
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, response => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function getTeamIdentity(team) {
+  return MatchDayStorage.getTeamIdentity(team, activeProvider);
+}
+
+function openVerifiedSourceUrl(url) {
+  const source = ['vipbox', 'hoofoot'].find(name =>
+    MatchDayStorage.isAllowedMatchUrl(name, url, sourceBases[name])
+  );
+  if (source) chrome.tabs.create({ url });
+}
 
 // ── Initials Avatar (used when no crest URL is available) ──
 // Returns an HTML string: either an <img> (if crestUrl is non-empty) or
@@ -86,11 +113,18 @@ document.addEventListener('click', (e) => {
   if (starBtn) {
     e.preventDefault();
     e.stopPropagation();
-    const teamId = Number(starBtn.dataset.teamId);
+    const teamId = starBtn.dataset.teamId;
+    const provider = starBtn.dataset.teamProvider || activeProvider;
     const teamName = starBtn.dataset.teamName;
     const teamCrest = starBtn.dataset.teamCrest;
     const compName = starBtn.dataset.compName;
-    toggleFollowTeamSimple({ id: teamId, name: teamName, crest: teamCrest, competitionName: compName });
+    toggleFollowTeamSimple({
+      id: teamId,
+      provider,
+      name: teamName,
+      crest: teamCrest,
+      competitionName: compName
+    });
     return;
   }
 
@@ -99,7 +133,7 @@ document.addEventListener('click', (e) => {
   if (linkBtn && linkBtn.dataset.url) {
     e.preventDefault();
     e.stopPropagation();
-    chrome.tabs.create({ url: linkBtn.dataset.url });
+    openVerifiedSourceUrl(linkBtn.dataset.url);
     return;
   }
 
@@ -107,7 +141,7 @@ document.addEventListener('click', (e) => {
   const matchCard = e.target.closest('.match-card');
   if (matchCard && matchCard.dataset.primaryUrl) {
     e.preventDefault();
-    chrome.tabs.create({ url: matchCard.dataset.primaryUrl });
+    openVerifiedSourceUrl(matchCard.dataset.primaryUrl);
     return;
   }
 
@@ -126,7 +160,7 @@ document.addEventListener('keydown', (e) => {
     const card = document.activeElement?.closest?.('.match-card');
     if (card && card.dataset.primaryUrl && !e.target.closest('button')) {
       e.preventDefault();
-      chrome.tabs.create({ url: card.dataset.primaryUrl });
+      openVerifiedSourceUrl(card.dataset.primaryUrl);
     }
   }
 });
@@ -153,20 +187,23 @@ function formatLocalDate(d) {
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
-  // Check API key
-  const { apiKey } = await chrome.storage.local.get('apiKey');
-  if (!apiKey) {
-    apiKeyOverlay.classList.remove('hidden');
-  } else {
-    apiKeyOverlay.classList.add('hidden');
-  }
+  const settings = await MatchDayStorage.getSettings();
+  activeProvider = settings.provider;
+  sourceBases = { vipbox: settings.vipboxBase, hoofoot: settings.hoofootBase };
+  apiKeyOverlay.classList.toggle('hidden', Boolean(settings.apiKey));
 
   // Load saved state
   const stored = await chrome.storage.local.get(['selectedLeagues', 'followedTeams', 'collapsedLeagues']);
   selectedLeagues = (stored.selectedLeagues && stored.selectedLeagues.length > 2)
     ? stored.selectedLeagues
     : ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1'];
-  followedTeams = stored.followedTeams || [];
+  followedTeams = (stored.followedTeams || []).map(team => ({
+    ...team,
+    provider: team.provider || activeProvider
+  }));
+  if ((stored.followedTeams || []).some(team => !team.provider)) {
+    await chrome.storage.local.set({ followedTeams });
+  }
   collapsedLeagues = new Set(stored.collapsedLeagues || []);
 
   // Ensure default leagues saved
@@ -175,7 +212,7 @@ async function init() {
   }
 
   // Populate cache with existing followed teams
-  followedTeams.forEach(t => teamsCache.set(t.id, t));
+  followedTeams.forEach(team => teamsCache.set(getTeamIdentity(team), team));
 
   // Get leagues data from background
   chrome.runtime.sendMessage({ type: 'GET_LEAGUES' }, (res) => {
@@ -189,7 +226,7 @@ async function init() {
   setupTabNav();
   setupDateFilter();
   setupSubFilters();
-  setupApiKeyForm();
+  setupApiKeyForm(settings);
   setupRefresh();
   setupSettings();
   setupTeamSearch();
@@ -216,8 +253,9 @@ function setupOfflineListeners() {
 }
 
 // ── API Key Form with Multi-Provider Support ────────
-function setupApiKeyForm() {
-  let selectedProvider = 'openfoot';
+function setupApiKeyForm(settings) {
+  let selectedProvider = settings.provider;
+  const providerKeys = { ...settings.apiKeys };
   const btnOF = document.getElementById('setupProviderOpenFoot');
   const btnFD = document.getElementById('setupProviderFD');
   const linkEl = document.getElementById('setupApiKeyLink');
@@ -230,6 +268,7 @@ function setupApiKeyForm() {
       apiKeyInput.placeholder = provider === 'openfoot'
         ? 'Paste your OpenFootAPI key...'
         : 'Paste your Football-Data.org API key...';
+      apiKeyInput.value = providerKeys[provider] || '';
     }
     if (linkEl) {
       linkEl.textContent = provider === 'openfoot'
@@ -243,6 +282,7 @@ function setupApiKeyForm() {
 
   btnOF?.addEventListener('click', () => updateSetupProvider('openfoot'));
   btnFD?.addEventListener('click', () => updateSetupProvider('football_data'));
+  updateSetupProvider(selectedProvider);
 
   saveApiKeyBtn.addEventListener('click', async () => {
     const key = apiKeyInput.value.trim();
@@ -253,32 +293,27 @@ function setupApiKeyForm() {
     saveApiKeyBtn.disabled = true;
     if (errEl) errEl.textContent = '';
 
-    chrome.runtime.sendMessage({
-      type: 'TEST_API_KEY',
-      apiKey: key,
-      provider: selectedProvider
-    }, async (res) => {
+    try {
+      const res = await sendRuntimeMessage({
+        type: 'TEST_API_KEY',
+        apiKey: key,
+        provider: selectedProvider
+      });
       if (res?.success) {
-        const toSave = {
-          apiProvider: selectedProvider,
-          apiKey: key
-        };
-        if (selectedProvider === 'openfoot') {
-          toSave.apiKey_openfoot = key;
-        } else {
-          toSave.apiKey_footballdata = key;
-        }
-        await chrome.storage.local.set(toSave);
+        await MatchDayStorage.setApiKey(selectedProvider, key);
+        activeProvider = selectedProvider;
+        providerKeys[selectedProvider] = key;
         apiKeyOverlay.classList.add('hidden');
-        saveApiKeyBtn.textContent = 'Save & Start';
-        saveApiKeyBtn.disabled = false;
         loadMatches();
       } else {
         if (errEl) errEl.textContent = `❌ Key rejected (status ${res?.status || '?'}). Please check and try again.`;
-        saveApiKeyBtn.textContent = 'Save & Start';
-        saveApiKeyBtn.disabled = false;
       }
-    });
+    } catch (error) {
+      if (errEl) errEl.textContent = 'Unable to verify the API key. Check your connection and try again.';
+    } finally {
+      saveApiKeyBtn.textContent = 'Save & Start';
+      saveApiKeyBtn.disabled = false;
+    }
   });
 }
 
@@ -386,43 +421,43 @@ function setupSubFilters() {
 
 // ── Load Matches ────────────────────────
 async function loadMatches(isSilent = false, specificComps = null) {
-  // Fix B7/debounce: drop concurrent full reloads; allow silent targeted refreshes
   if (isFetching && !isSilent) return;
   if (!isSilent) isFetching = true;
-
-  // Fix B7: remove unreliable navigator.onLine pre-check — let the fetch fail naturally
   if (!isSilent) {
     showMatchesSkeleton();
     setStatus('Fetching matches...');
   }
 
-  const { from, to } = getDateRange();
+  const targetedKey = isSilent && specificComps?.length
+    ? [...specificComps].sort().join(',')
+    : null;
+  if (targetedKey && targetedFetches.has(targetedKey)) return;
+  if (targetedKey) targetedFetches.add(targetedKey);
 
-  chrome.runtime.sendMessage({
-    type: 'GET_MATCHES',
-    dateFrom: from,
-    dateTo: to,
-    competitions: specificComps || selectedLeagues
-  }, (res) => {
-    if (chrome.runtime.lastError) {
-      if (!isSilent) showMatchesError('Connection error. Please try again.');
-      return;
-    }
+  try {
+    const { from, to } = getDateRange();
+    const res = await sendRuntimeMessage({
+      type: 'GET_MATCHES',
+      dateFrom: from,
+      dateTo: to,
+      competitions: specificComps || selectedLeagues,
+      forceRefresh: Boolean(targetedKey)
+    });
     if (!res) {
       if (!isSilent) showMatchesError('No response from service worker. Try refreshing.');
       return;
     }
     if (res.success) {
-      if (specificComps && specificComps.length > 0) {
-        // Merge updated live matches into existing list
+      if (specificComps && specificComps.length > 0 && !res.isStale) {
         const updated = res.data || [];
-        const updatedMap = new Map(updated.map(m => [m.id, m]));
-        currentMatches = currentMatches.map(m => updatedMap.has(m.id) ? updatedMap.get(m.id) : m);
-      } else {
+        const refreshedCompetitions = new Set(specificComps);
+        currentMatches = currentMatches.filter(match =>
+          !refreshedCompetitions.has(match.competitionCode)
+        ).concat(updated);
+      } else if (!specificComps || specificComps.length === 0) {
         currentMatches = res.data || [];
       }
 
-      isFetching = false;
       lastFetchTimestamp = Date.now();
       updateLiveBadgeAndEmphasis();
       applyFiltersAndRender();
@@ -438,18 +473,23 @@ async function loadMatches(isSilent = false, specificComps = null) {
       }
       updateRelativeTime();
     } else {
-      isFetching = false;
       if (res.error === 'NO_API_KEY') {
         apiKeyOverlay.classList.remove('hidden');
       } else if (res.error === 'INVALID_API_KEY') {
         showMatchesError('Invalid API key. Please update in Settings.');
       } else if (res.error === 'RATE_LIMIT') {
         setStatus('API rate limit reached – showing cached matches');
-      } else {
+      } else if (!isSilent) {
         showMatchesError(res.error || 'Failed to load matches.');
       }
     }
-  });
+  } catch (error) {
+    if (!isSilent) showMatchesError('Connection error. Please try again.');
+    else console.warn('Match refresh failed:', error.message);
+  } finally {
+    if (!isSilent) isFetching = false;
+    if (targetedKey) targetedFetches.delete(targetedKey);
+  }
 }
 
 // ── Update Live Badge Count & Visual Prominence ──
@@ -478,9 +518,10 @@ function applyFiltersAndRender() {
   if (currentSubFilter === 'live') {
     filtered = filtered.filter(m => m.status === 'IN_PLAY' || m.status === 'PAUSED' || m.isLive);
   } else if (currentSubFilter === 'followed') {
-    const followedIds = new Set(followedTeams.map(t => t.id));
+    const followedIds = new Set(followedTeams.map(getTeamIdentity));
     filtered = filtered.filter(m =>
-      followedIds.has(m.homeTeam?.id) || followedIds.has(m.awayTeam?.id)
+      followedIds.has(getTeamIdentity(m.homeTeam)) ||
+      followedIds.has(getTeamIdentity(m.awayTeam))
     );
   }
 
@@ -583,12 +624,16 @@ function renderMatchesList(matches) {
   // 1. Leagues with active live games first
   // 2. Followed leagues / containing followed clubs
   // 3. Official league priority tier
-  const followedIds = new Set(followedTeams.map(t => t.id));
+  const followedIds = new Set(followedTeams.map(getTeamIdentity));
   const sortedGroups = Array.from(grouped.values()).sort((a, b) => {
     if (a.hasLive !== b.hasLive) return a.hasLive ? -1 : 1;
 
-    const aFollowed = a.matches.some(m => followedIds.has(m.homeTeam?.id) || followedIds.has(m.awayTeam?.id));
-    const bFollowed = b.matches.some(m => followedIds.has(m.homeTeam?.id) || followedIds.has(m.awayTeam?.id));
+    const aFollowed = a.matches.some(m =>
+      followedIds.has(getTeamIdentity(m.homeTeam)) || followedIds.has(getTeamIdentity(m.awayTeam))
+    );
+    const bFollowed = b.matches.some(m =>
+      followedIds.has(getTeamIdentity(m.homeTeam)) || followedIds.has(getTeamIdentity(m.awayTeam))
+    );
     if (aFollowed !== bFollowed) return aFollowed ? -1 : 1;
 
     return a.priority - b.priority;
@@ -647,6 +692,12 @@ function renderMatchCard(match, dateRange) {
 
   const isLive = (status === 'IN_PLAY' || status === 'PAUSED' || match.isLive);
   const isFinished = (status === 'FINISHED' || match.isFinished);
+  const liveStreamUrl = MatchDayStorage.isAllowedMatchUrl(
+    'vipbox', match.liveStreamUrl, sourceBases.vipbox
+  ) ? match.liveStreamUrl : null;
+  const highlightsUrl = MatchDayStorage.isAllowedMatchUrl(
+    'hoofoot', match.highlightsUrl, sourceBases.hoofoot
+  ) ? match.highlightsUrl : null;
 
   // Contextual Left Column
   let leftColHtml = '';
@@ -656,12 +707,10 @@ function renderMatchCard(match, dateRange) {
     const day = d.getDate();
     leftColHtml = `<span class="card-left-label date-label" aria-label="${weekday} ${day}">${weekday}<br>${day}</span>`;
   } else if (isLive) {
-    // Fix B1: show "~LIVE" caveat when status was inferred, not confirmed by API
     const elapsed = match.elapsedMins != null ? `${match.elapsedMins}'`
       : (match.minute != null ? `${match.minute}'`
-      : (status === 'PAUSED' ? 'HT' : (match.isInferredLive ? '~LIVE' : 'LIVE')));
-    const inferredClass = match.isInferredLive ? ' inferred' : '';
-    leftColHtml = `<span class="card-left-label live-label${inferredClass}" aria-label="Live ${elapsed}" title="${match.isInferredLive ? 'Status inferred — not yet confirmed by API' : ''}"><span class="live-dot-sm" aria-hidden="true"></span>${elapsed}</span>`;
+      : (status === 'PAUSED' ? 'HT' : 'LIVE'));
+    leftColHtml = `<span class="card-left-label live-label" aria-label="Live ${elapsed}"><span class="live-dot-sm" aria-hidden="true"></span>${elapsed}</span>`;
   } else if (isFinished) {
     leftColHtml = `<span class="card-left-label ft-label" aria-label="Full Time">FT</span>`;
   } else {
@@ -695,16 +744,11 @@ function renderMatchCard(match, dateRange) {
       scoreHtml = `<span class="match-score">FT</span>`;
     }
 
-    if (match.highlightsUrl) {
+    if (highlightsUrl) {
       mediaBtnHtml = `
-        <button class="btn-media highlights open-tab-link" data-url="${escapeHtml(match.highlightsUrl)}" title="Watch full highlights on HooFoot" aria-label="Watch Highlights">
+        <button class="btn-media highlights open-tab-link" data-url="${escapeHtml(highlightsUrl)}" title="Watch full highlights on HooFoot" aria-label="Watch Highlights">
           🎬 Highlights
         </button>`;
-    } else {
-      mediaBtnHtml = `
-        <span class="btn-media highlights disabled" title="Highlights not yet published" aria-label="Highlights Soon">
-          ⏳ Soon
-        </span>`;
     }
   } else if (isLive) {
     // Fix B5: read regularTime (running score) not fullTime (only set at final whistle)
@@ -712,42 +756,51 @@ function renderMatchCard(match, dateRange) {
     const liveHome = rt.home ?? ft.home ?? 0;
     const liveAway = rt.away ?? ft.away ?? 0;
     scoreHtml = `<span class="match-score">${liveHome} – ${liveAway}</span>`;
-    mediaBtnHtml = `
-      <button class="btn-media live open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Watch live match stream on VIPBox" aria-label="Watch Live">
-        <span class="live-dot-mini" aria-hidden="true"></span> Live
-      </button>`;
-  } else {
-    // Scheduled / Timed
+    if (liveStreamUrl) {
+      mediaBtnHtml = `
+        <button class="btn-media live open-tab-link" data-url="${escapeHtml(liveStreamUrl)}" title="Watch live match stream on VIPBox" aria-label="Watch Live">
+          <span class="live-dot-mini" aria-hidden="true"></span> Live
+        </button>`;
+    }
+  } else if (status === 'SCHEDULED' || status === 'TIMED') {
     scoreHtml = `<span class="match-vs">vs</span>`;
     statusBadgeHtml = `<span class="match-countdown" data-utc="${escapeHtml(match.utcDate)}">${getCountdown(match.utcDate)}</span>`;
-    mediaBtnHtml = `
-      <button class="btn-media stream open-tab-link" data-url="${escapeHtml(match.liveStreamUrl)}" title="Stream schedule on VIPBox" aria-label="Open Stream">
-        📺 Stream
-      </button>`;
+    if (liveStreamUrl) {
+      mediaBtnHtml = `
+        <button class="btn-media stream open-tab-link" data-url="${escapeHtml(liveStreamUrl)}" title="Open verified match stream on VIPBox" aria-label="Open Stream">
+          📺 Stream
+        </button>`;
+    }
+  } else {
+    scoreHtml = `<span class="match-vs">vs</span>`;
+    statusBadgeHtml = `<span class="match-status-label">${escapeHtml(status || 'UNKNOWN')}</span>`;
   }
 
-  // Fix B11: use leagueHighlightsPage fallback so card click goes to the
-  // league highlights index — not the HooFoot homepage — when no specific URL exists.
   const primaryUrl = isFinished
-    ? (match.highlightsUrl || match.leagueHighlightsPage || 'https://hoofoot.net')
-    : (match.liveStreamUrl || 'https://vipbox.ga/football-schedule');
+    ? highlightsUrl
+    : liveStreamUrl;
 
   // Check if teams are followed
-  const isHomeFollowed = followedTeams.some(t => t.id === homeTeam.id);
-  const isAwayFollowed = followedTeams.some(t => t.id === awayTeam.id);
+  const isHomeFollowed = followedTeams.some(team =>
+    getTeamIdentity(team) === getTeamIdentity(homeTeam)
+  );
+  const isAwayFollowed = followedTeams.some(team =>
+    getTeamIdentity(team) === getTeamIdentity(awayTeam)
+  );
 
   const homeFullName = homeTeam.name || homeTeam.shortName || 'TBD';
   const awayFullName = awayTeam.name || awayTeam.shortName || 'TBD';
   const compName = match.competitionName || '';
 
   return `
-    <div class="match-card ${isLive ? 'is-live' : ''}" data-primary-url="${escapeHtml(primaryUrl)}" tabindex="0" role="link" aria-label="${escapeHtml(homeFullName)} versus ${escapeHtml(awayFullName)}">
+    <div class="match-card ${isLive ? 'is-live' : ''}" data-primary-url="${escapeHtml(primaryUrl || '')}" tabindex="${primaryUrl ? '0' : '-1'}" role="${primaryUrl ? 'link' : 'article'}" aria-label="${escapeHtml(homeFullName)} versus ${escapeHtml(awayFullName)}">
       <div class="match-main-row">
         ${leftColHtml}
         <div class="match-teams-row">
           <div class="match-team home ${homeWinnerClass}">
             <button class="team-star-btn ${isHomeFollowed ? 'active' : ''}" 
-                    data-team-id="${homeTeam.id}" 
+                    data-team-id="${escapeHtml(String(homeTeam.id ?? ''))}"
+                    data-team-provider="${escapeHtml(homeTeam.provider || match.provider || activeProvider)}"
                     data-team-name="${escapeHtml(homeFullName)}" 
                     data-team-crest="${escapeHtml(homeTeam.crest || '')}" 
                     data-comp-name="${escapeHtml(compName)}"
@@ -768,7 +821,8 @@ function renderMatchCard(match, dateRange) {
             <span class="team-name" title="${escapeHtml(awayFullName)}">${escapeHtml(awayTeam.shortName || awayTeam.name || 'TBD')}</span>
             ${teamAvatarHtml(awayFullName, awayTeam.crest)}
             <button class="team-star-btn ${isAwayFollowed ? 'active' : ''}" 
-                    data-team-id="${awayTeam.id}" 
+                    data-team-id="${escapeHtml(String(awayTeam.id ?? ''))}"
+                    data-team-provider="${escapeHtml(awayTeam.provider || match.provider || activeProvider)}"
                     data-team-name="${escapeHtml(awayFullName)}" 
                     data-team-crest="${escapeHtml(awayTeam.crest || '')}" 
                     data-comp-name="${escapeHtml(compName)}"
@@ -785,7 +839,7 @@ function renderMatchCard(match, dateRange) {
     </div>`;
 }
 
-// ── Countdown Calculation with Lapsed Match Defense ──
+// ── Countdown display; elapsed time does not imply match status ──
 function getCountdown(utcDate) {
   const now = new Date();
   const match = new Date(utcDate);
@@ -793,10 +847,7 @@ function getCountdown(utcDate) {
 
   if (diff <= 0) {
     const elapsedMins = Math.floor((now - match) / (60 * 1000));
-    if (elapsedMins > 115) return 'FT';
-    if (elapsedMins > 90) return 'FT soon';
-    if (elapsedMins > 45) return '2nd Half';
-    return 'Live';
+    return `Kickoff passed · ${elapsedMins}m · awaiting status`;
   }
 
   const hours = Math.floor(diff / (1000 * 60 * 60));
@@ -927,6 +978,7 @@ function setupTeamSearch() {
   let searchTimer = null;
   teamSearchInput.addEventListener('input', () => {
     clearTimeout(searchTimer);
+    searchRequestId++;
     searchTimer = setTimeout(() => {
       const query = teamSearchInput.value.trim();
       if (query.length < 2) {
@@ -939,20 +991,26 @@ function setupTeamSearch() {
 }
 
 function searchTeams(query) {
+  const requestId = ++searchRequestId;
   searchResults.innerHTML = `
     <div class="skeleton-group" aria-hidden="true">
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div></div>
       <div class="skeleton-card"><div class="skeleton skeleton-line"></div></div>
     </div>`;
 
-  chrome.runtime.sendMessage({
+  sendRuntimeMessage({
     type: 'SEARCH_TEAMS',
     query,
     leagues: selectedLeagues
-  }, (res) => {
+  }).then(res => {
+    if (requestId !== searchRequestId) return;
     if (res?.success) {
       renderSearchResults(res.data);
     } else {
+      searchResults.innerHTML = `<div class="empty-state"><p>Search failed. Try again.</p></div>`;
+    }
+  }).catch(() => {
+    if (requestId === searchRequestId) {
       searchResults.innerHTML = `<div class="empty-state"><p>Search failed. Try again.</p></div>`;
     }
   });
@@ -969,21 +1027,21 @@ function renderSearchResults(teams) {
     return;
   }
 
-  const followedIds = new Set(followedTeams.map(t => t.id));
+  const followedIds = new Set(followedTeams.map(getTeamIdentity));
 
-  // Cache teams for lookup
-  teams.forEach(t => teamsCache.set(t.id, t));
+  teams.forEach(team => teamsCache.set(getTeamIdentity(team), team));
 
   searchResults.innerHTML = teams.slice(0, 20).map(team => {
-    const isFollowing = followedIds.has(team.id);
+    const identity = getTeamIdentity(team);
+    const isFollowing = followedIds.has(identity);
     return `
-      <div class="team-card" data-team-id="${team.id}">
+      <div class="team-card" data-team-id="${escapeHtml(String(team.id))}">
         ${teamAvatarHtml(team.name, team.crest)}
         <div class="team-info">
           <div class="team-name" title="${escapeHtml(team.name)}">${escapeHtml(team.name)}</div>
           <div class="team-league">${escapeHtml(team.competitionName || '')}</div>
         </div>
-        <button class="team-follow-btn ${isFollowing ? 'following' : ''}" data-team-id="${team.id}" aria-label="${isFollowing ? 'Unfollow' : 'Follow'} ${escapeHtml(team.name)}">
+        <button class="team-follow-btn ${isFollowing ? 'following' : ''}" data-team-id="${escapeHtml(String(team.id))}" data-team-provider="${escapeHtml(team.provider || activeProvider)}" aria-label="${isFollowing ? 'Unfollow' : 'Follow'} ${escapeHtml(team.name)}">
           ${isFollowing ? '✓ Following' : '+ Follow'}
         </button>
       </div>`;
@@ -992,8 +1050,10 @@ function renderSearchResults(teams) {
   searchResults.querySelectorAll('.team-follow-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const teamId = Number(btn.dataset.teamId);
-      const team = teamsCache.get(teamId);
+      const team = teamsCache.get(getTeamIdentity({
+        id: btn.dataset.teamId,
+        provider: btn.dataset.teamProvider
+      }));
       if (team) toggleFollowTeam(team, btn);
     });
   });
@@ -1010,18 +1070,18 @@ function renderFollowedTeams() {
     return;
   }
 
-  followedTeams.forEach(t => teamsCache.set(t.id, t));
+  followedTeams.forEach(team => teamsCache.set(getTeamIdentity(team), team));
 
   followedTeamsEl.innerHTML = `
     <div class="followed-label">Your Teams (${followedTeams.length})</div>
     ${followedTeams.map(team => `
-      <div class="team-card" data-team-id="${team.id}">
+      <div class="team-card" data-team-id="${escapeHtml(String(team.id))}">
         ${teamAvatarHtml(team.name, team.crest)}
         <div class="team-info">
           <div class="team-name" title="${escapeHtml(team.name)}">${escapeHtml(team.name)}</div>
           <div class="team-league">${escapeHtml(team.competitionName || '')}</div>
         </div>
-        <button class="team-follow-btn following" data-team-id="${team.id}" aria-label="Unfollow ${escapeHtml(team.name)}">
+        <button class="team-follow-btn following" data-team-id="${escapeHtml(String(team.id))}" data-team-provider="${escapeHtml(team.provider || activeProvider)}" aria-label="Unfollow ${escapeHtml(team.name)}">
           ✓ Following
         </button>
       </div>
@@ -1030,8 +1090,10 @@ function renderFollowedTeams() {
   followedTeamsEl.querySelectorAll('.team-follow-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const teamId = Number(btn.dataset.teamId);
-      const team = teamsCache.get(teamId);
+      const team = teamsCache.get(getTeamIdentity({
+        id: btn.dataset.teamId,
+        provider: btn.dataset.teamProvider
+      }));
       if (team) toggleFollowTeam(team, btn);
     });
   });
@@ -1039,12 +1101,16 @@ function renderFollowedTeams() {
 
 // ── Instant Team Follow / Unfollow (from card star or search) ─
 function toggleFollowTeamSimple(team) {
-  if (!team || !team.id) return;
+  if (!team || team.id === undefined || team.id === null || String(team.id) === '') return;
+  team.provider = team.provider || activeProvider;
   toggleFollowTeam(team);
 }
 
 function toggleFollowTeam(team, btnEl) {
-  const idx = followedTeams.findIndex(t => t.id === team.id);
+  if (!team || team.id === undefined || team.id === null || String(team.id) === '') return;
+  team.provider = team.provider || activeProvider;
+  const identity = getTeamIdentity(team);
+  const idx = followedTeams.findIndex(followed => getTeamIdentity(followed) === identity);
   if (idx > -1) {
     followedTeams.splice(idx, 1);
     if (btnEl) {
@@ -1053,7 +1119,7 @@ function toggleFollowTeam(team, btnEl) {
     }
   } else {
     followedTeams.push(team);
-    teamsCache.set(team.id, team);
+    teamsCache.set(identity, team);
     if (btnEl) {
       btnEl.classList.add('following');
       btnEl.textContent = '✓ Following';
@@ -1062,8 +1128,12 @@ function toggleFollowTeam(team, btnEl) {
   chrome.storage.local.set({ followedTeams });
 
   // Update star buttons on visible match cards immediately
-  const isNowFollowed = followedTeams.some(t => t.id === team.id);
-  $$(`.team-star-btn[data-team-id="${team.id}"]`).forEach(star => {
+  const isNowFollowed = followedTeams.some(followed => getTeamIdentity(followed) === identity);
+  $$('.team-star-btn').forEach(star => {
+    if (getTeamIdentity({
+      id: star.dataset.teamId,
+      provider: star.dataset.teamProvider
+    }) !== identity) return;
     star.classList.toggle('active', isNowFollowed);
     star.textContent = isNowFollowed ? '★' : '☆';
     star.title = `${isNowFollowed ? 'Unfollow' : 'Follow'} ${team.name || ''}`;
@@ -1079,13 +1149,22 @@ function toggleFollowTeam(team, btnEl) {
 
 // ── Refresh & Settings ──────────────────
 function setupRefresh() {
-  refreshBtn.addEventListener('click', () => {
+  refreshBtn.addEventListener('click', async () => {
     if (refreshBtn.classList.contains('spinning')) return;
     refreshBtn.classList.add('spinning');
-    chrome.runtime.sendMessage({ type: 'REFRESH' }, () => {
-      loadMatches();
+    try {
+      const response = await sendRuntimeMessage({ type: 'REFRESH' });
+      if (!response?.success) {
+        showMatchesError(response?.error || 'Unable to refresh matches.');
+        return;
+      }
+      await loadMatches();
+    } catch (error) {
+      showMatchesError('Connection error. Please try again.');
+      console.warn('Refresh request failed:', error.message);
+    } finally {
       setTimeout(() => refreshBtn.classList.remove('spinning'), 750);
-    });
+    }
   });
 }
 

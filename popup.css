@@ -701,6 +701,12 @@ button:focus-visible, input:focus-visible {
   margin-top: 1px;
   font-variant-numeric: tabular-nums;
 }
+.match-status-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
 
 /* Action buttons */
 .match-action-row {

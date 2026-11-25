@@ -6,15 +6,14 @@ A lightweight, modern Google Chrome extension (Manifest V3) that lets football f
 
 ## ✨ Features
 
-- **Live Fixtures & Real-Time Scores:** Quick-access popup displaying live matchday fixtures, live scores (`HT`/`LIVE`), full-time results, and kickoff countdowns.
+- **Live Fixtures & Real-Time Scores:** Quick-access popup displaying fixtures, API-confirmed live scores (`HT`/`LIVE`), full-time results, and kickoff countdowns. Elapsed kickoff time is only a countdown hint and never promotes a scheduled match to live or finished.
 - **FotMob / Flashscore Sequencing:** Matches grouped by competition priority (Champions League, Premier League, La Liga, etc.) with live matches hoisted to the top.
-- **Direct Live Match Streams (VIPBox):** 1-click **"▶ Watch Live"** button on each match card linking directly to that specific fixture's stream on [VIPBox](https://vipbox.ga/football-schedule).
-- **Direct Full Highlights (HooFoot):** 1-click **"🎬 Full Highlights"** button on completed matches taking you straight to the full video replay on [HooFoot](https://hoofoot.net/).
+- **Verified Match Links:** Stream and highlight controls appear only when a concrete match-specific link is found on an approved VIPBox or HooFoot host. MatchDay does not generate guessed match URLs or fall back to generic pages.
 - **Date Navigation:** Browse fixtures across **Yesterday**, **Today**, **Tomorrow**, and **This Week**.
 - **Filter Chips:** Instant filters for **All Matches**, **🔴 Live (with active count badge)**, and **⭐ My Teams**.
 - **Favorite Clubs Filtering:** Search, pin, and follow your favorite clubs worldwide so you never miss a kickoff.
 - **Quota-Optimized MV3 Service Worker:** Single unified API query engine cutting network consumption by ~90% to avoid free-tier rate limits.
-- **Offline Resilience:** Instant load time with local browser storage (`chrome.storage`) caching and native system fonts.
+- **Provider-scoped Offline Resilience:** Local browser storage caches provider and competition data separately and can fall back to cached team lists if a provider is unavailable.
 
 ---
 
@@ -22,10 +21,14 @@ A lightweight, modern Google Chrome extension (Manifest V3) that lets football f
 
 - **Platform:** Google Chrome Extension (Manifest V3)
 - **Languages:** JavaScript (ES6+), HTML5, CSS3
-- **Data Source:** Football-Data.org REST API
-- **Live Stream Source:** VIPBox (`https://vipbox.ga/`)
-- **Highlights Source:** HooFoot (`https://hoofoot.net/`)
+- **Data Providers:** OpenFootAPI and Football-Data.org REST APIs
+- **Live Stream Source:** VIPBox (approved HTTPS hosts: `vipbox.ga`, `vipbox.lc`, `vipbox.be`)
+- **Highlights Source:** HooFoot (approved HTTPS host: `hoofoot.net`)
 - **Chrome APIs:** `chrome.storage`, `chrome.alarms`, `chrome.action`, `chrome.tabs`
+
+Provider-specific API keys are managed through shared settings storage and remain separate when switching providers. The active provider's key stays synchronized with the legacy `apiKey` setting for compatibility; existing provider-specific legacy key fields are also preserved.
+
+The Settings page accepts only HTTPS base URLs on the source allowlists above. Unsupported hosts, non-HTTPS URLs, credentials, ports, and paths are rejected; changing source domains does not grant new host permissions.
 
 ---
 ##📱Screenshots

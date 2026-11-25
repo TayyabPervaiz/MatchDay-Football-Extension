@@ -65,22 +65,15 @@ function updateProviderUI(provider) {
 }
 
 // ── Load saved values ────────────────────
-chrome.storage.local.get([
-  'apiProvider',
-  'apiKey',
-  'apiKey_openfoot',
-  'apiKey_footballdata',
-  'vipboxBase',
-  'hoofootBase'
-], (data) => {
-  currentProvider = data.apiProvider || 'openfoot';
-  keys.openfoot = data.apiKey_openfoot || (currentProvider === 'openfoot' ? data.apiKey : '') || '';
-  keys.football_data = data.apiKey_footballdata || (currentProvider === 'football_data' ? data.apiKey : '') || '';
-
+MatchDayStorage.getSettings().then(({ provider, apiKeys, vipboxBase, hoofootBase }) => {
+  currentProvider = provider;
+  keys.openfoot = apiKeys.openfoot || '';
+  keys.football_data = apiKeys.football_data || '';
   updateProviderUI(currentProvider);
-
-  if (vipboxBaseField)  vipboxBaseField.value  = data.vipboxBase  || 'https://vipbox.ga';
-  if (hoofootBaseField) hoofootBaseField.value = data.hoofootBase || 'https://hoofoot.net';
+  if (vipboxBaseField) vipboxBaseField.value = vipboxBase;
+  if (hoofootBaseField) hoofootBaseField.value = hoofootBase;
+}).catch(() => {
+  showStatus(apiKeyStatus, 'Unable to load saved settings', true);
 });
 
 // ── Switch Provider Listeners ────────────
@@ -88,12 +81,18 @@ providerOpenFoot?.addEventListener('change', () => {
   if (providerOpenFoot.checked) {
     keys[currentProvider] = apiKeyField.value.trim();
     updateProviderUI('openfoot');
+    MatchDayStorage.setProvider('openfoot').catch(() =>
+      showStatus(apiKeyStatus, 'Unable to switch provider', true)
+    );
   }
 });
 providerFootballData?.addEventListener('change', () => {
   if (providerFootballData.checked) {
     keys[currentProvider] = apiKeyField.value.trim();
     updateProviderUI('football_data');
+    MatchDayStorage.setProvider('football_data').catch(() =>
+      showStatus(apiKeyStatus, 'Unable to switch provider', true)
+    );
   }
 });
 
@@ -107,26 +106,15 @@ saveApiKeyBtn?.addEventListener('click', async () => {
   const key = apiKeyField.value.trim();
   keys[currentProvider] = key;
 
-  const storageUpdate = {
-    apiProvider: currentProvider,
-    apiKey: key // Sync active key to legacy 'apiKey' for backward compatibility
-  };
-
-  if (currentProvider === 'openfoot') {
-    storageUpdate.apiKey_openfoot = key;
-  } else {
-    storageUpdate.apiKey_footballdata = key;
-  }
-
-  await chrome.storage.local.set(storageUpdate);
+  await MatchDayStorage.setApiKey(currentProvider, key);
 
   // Clear match fixtures caches so the newly selected API loads fresh data
   const storage = await chrome.storage.local.get(null);
   const matchKeys = Object.keys(storage).filter(k =>
+    k.startsWith(`matches_${currentProvider}_`) ||
+    k.startsWith(`master_matches_${currentProvider}_`) ||
     k.startsWith('date_') ||
-    k.startsWith('comp_') ||
-    k.startsWith('master_matches_') ||
-    k.startsWith('matches_')
+    k.startsWith('comp_')
   );
   if (matchKeys.length) await chrome.storage.local.remove(matchKeys);
 
@@ -156,21 +144,29 @@ testApiKeyBtn?.addEventListener('click', () => {
 clearApiKeyBtn?.addEventListener('click', async () => {
   keys[currentProvider] = '';
   apiKeyField.value = '';
-  const removeKey = currentProvider === 'openfoot' ? 'apiKey_openfoot' : 'apiKey_footballdata';
-  await chrome.storage.local.remove([removeKey, 'apiKey']);
+  await MatchDayStorage.setApiKey(currentProvider, '');
   showStatus(apiKeyStatus, '✓ Key cleared for this provider');
 });
 
 // ── Save stream source domains ───────────
 if (saveSourcesBtn) {
   saveSourcesBtn.addEventListener('click', async () => {
-    const vipbox  = (vipboxBaseField?.value  || '').trim().replace(/\/$/, '') || 'https://vipbox.ga';
-    const hoofoot = (hoofootBaseField?.value || '').trim().replace(/\/$/, '') || 'https://hoofoot.net';
-    await chrome.storage.local.set({ vipboxBase: vipbox, hoofootBase: hoofoot });
-    const storage = await chrome.storage.local.get(null);
-    const staleKeys = Object.keys(storage).filter(k => k === 'vipbox_schedule' || k.startsWith('hoofoot_index_'));
-    if (staleKeys.length) await chrome.storage.local.remove(staleKeys);
-    showStatus(sourcesStatus, '✓ Sources saved!');
+    try {
+      const { vipboxBase, hoofootBase } = await MatchDayStorage.setSourceBases(
+        vipboxBaseField?.value || '',
+        hoofootBaseField?.value || ''
+      );
+      if (vipboxBaseField) vipboxBaseField.value = vipboxBase;
+      if (hoofootBaseField) hoofootBaseField.value = hoofootBase;
+      const storage = await chrome.storage.local.get(null);
+      const staleKeys = Object.keys(storage).filter(k =>
+        k.startsWith('vipbox_schedule_') || k.startsWith('hoofoot_index_')
+      );
+      if (staleKeys.length) await chrome.storage.local.remove(staleKeys);
+      showStatus(sourcesStatus, '✓ Sources saved!');
+    } catch {
+      showStatus(sourcesStatus, 'Use HTTPS URLs on the supported VIPBox/HooFoot hosts only.', true);
+    }
   });
 }
 
@@ -179,6 +175,11 @@ if (resetSourcesBtn) {
     await chrome.storage.local.remove(['vipboxBase', 'hoofootBase']);
     if (vipboxBaseField)  vipboxBaseField.value  = 'https://vipbox.ga';
     if (hoofootBaseField) hoofootBaseField.value = 'https://hoofoot.net';
+    const storage = await chrome.storage.local.get(null);
+    const sourceCacheKeys = Object.keys(storage).filter(key =>
+      key.startsWith('vipbox_schedule_') || key.startsWith('hoofoot_index_')
+    );
+    if (sourceCacheKeys.length) await chrome.storage.local.remove(sourceCacheKeys);
     showStatus(sourcesStatus, '✓ Reset to defaults');
   });
 }
@@ -191,9 +192,11 @@ clearCacheBtn?.addEventListener('click', async () => {
     k.startsWith('matches_') ||
     k.startsWith('teams_') ||
     k.startsWith('comp_') ||
+    k.startsWith('date_') ||
     k.startsWith('master_matches_') ||
     k.startsWith('hoofoot_index_') ||
-    k === 'vipbox_schedule'
+    k.startsWith('vipbox_schedule_') ||
+    k ===     'vipbox_schedule_'
   );
   await chrome.storage.local.remove(cacheKeys);
   showStatus(cacheStatus, `✓ Cleared ${cacheKeys.length} cached items`);
