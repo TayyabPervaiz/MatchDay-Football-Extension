@@ -672,7 +672,8 @@ async function fetchMatchesFootballData(dateFrom, dateTo, comps, options = {}) {
         dateFrom: apiFrom,
         dateTo: apiTo
       });
-      const matches = (res?.matches || []).map(normalizeFootballDataMatch);
+      if (!Array.isArray(res?.matches)) throw new Error('INVALID_API_RESPONSE');
+      const matches = res.matches.map(normalizeFootballDataMatch);
       await setCache(compCacheKey, matches);
       rawMatches.push(...matches);
     } catch (err) {
@@ -716,8 +717,8 @@ async function fetchMatchesOpenFoot(dateFrom, dateTo, comps, options = {}) {
 
     try {
       const res = await apiFetch('/matches', { date: dateStr, limit: 100 });
-      const rawList = res?.data || [];
-      const normalized = rawList.map(normalizeMatch);
+      if (!Array.isArray(res?.data)) throw new Error('INVALID_API_RESPONSE');
+      const normalized = res.data.map(normalizeMatch);
       await setCache(dateCacheKey, normalized);
       rawMatches.push(...normalized);
     } catch (err) {
@@ -1019,6 +1020,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             data: res.matches,
             isRateLimited: res.isRateLimited,
             isStale: res.isStale,
+            hasFetchError: res.hasFetchError,
             isTruncated: res.isTruncated
           });
           break;
@@ -1047,6 +1049,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               data: res.matches,
               isRateLimited: res.isRateLimited,
               isStale: res.isStale,
+              hasFetchError: res.hasFetchError,
               isTruncated: res.isTruncated
             });
             break;

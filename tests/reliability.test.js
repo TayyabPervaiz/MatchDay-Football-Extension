@@ -281,6 +281,34 @@ test('forced targeted match refresh bypasses provider cache and replaces empty r
   ));
 });
 
+test('malformed provider payloads are reported as fetch errors and are not cached as empty matches', async () => {
+  for (const provider of ['openfoot', 'football_data']) {
+    const worker = loadWorker({
+      initialStorage: { apiProvider: provider, apiKey: 'test-key' },
+      fetchResponse: async url => {
+        if (url.includes('/matches')) {
+          return { ok: true, async json() { return { unexpected: [] }; } };
+        }
+        return { ok: false, status: 404 };
+      }
+    });
+
+    const response = await worker.send({
+      type: 'GET_MATCHES',
+      dateFrom: '2099-01-01',
+      dateTo: '2099-01-01',
+      competitions: ['PL']
+    });
+
+    assert.equal(response.success, true);
+    assert.equal(response.hasFetchError, true);
+    assert.equal(response.data.length, 0);
+    assert.equal(Object.keys(worker.storage.values).some(key =>
+      key.startsWith(`matches_${provider}_`)
+    ), false);
+  }
+});
+
 test('popup clears its loading flag after a runtime request failure', async () => {
   const elements = new Map();
   for (const selector of ['#matchesList', '#statusText', '#lastUpdated']) {
@@ -324,4 +352,82 @@ test('popup clears its loading flag after a runtime request failure', async () =
   await vm.runInContext('loadMatches()', context);
   assert.equal(vm.runInContext('isFetching', context), false);
   assert.match(elements.get('#matchesList').innerHTML, /Connection error/);
+});
+
+test('popup refresh forces its selected fixture request and shows provider failures explicitly', async () => {
+  const elements = new Map();
+  for (const selector of ['#matchesList', '#statusText', '#lastUpdated', '#apiKeyOverlay']) {
+    elements.set(selector, {
+      innerHTML: '',
+      textContent: '',
+      classList: { add() {}, remove() {}, toggle() {} },
+      addEventListener() {}
+    });
+  }
+
+  let refreshHandler;
+  elements.set('#refreshBtn', {
+    classList: { contains() { return false; }, add() {}, remove() {} },
+    addEventListener(_type, handler) { refreshHandler = handler; }
+  });
+
+  const requests = [];
+  const chrome = {
+    runtime: {
+      lastError: null,
+      sendMessage(message, callback) {
+        requests.push(message);
+        callback({
+          success: true,
+          data: [],
+          hasFetchError: true,
+          isRateLimited: true
+        });
+      }
+    }
+  };
+  const context = vm.createContext({
+    chrome,
+    document: {
+      addEventListener() {},
+      querySelector(selector) { return elements.get(selector) || null; },
+      querySelectorAll() { return []; }
+    },
+    MatchDayStorage: {
+      DEFAULT_PROVIDER: 'openfoot',
+      DEFAULT_SOURCES: { vipbox: 'https://vipbox.ga', hoofoot: 'https://hoofoot.net' },
+      getTeamIdentity() { return null; },
+      isAllowedMatchUrl() { return false; }
+    },
+    URL,
+    console: { warn() {} },
+    setTimeout(callback) { callback(); },
+    clearTimeout
+  });
+  vm.runInContext(fs.readFileSync(path.join(root, 'popup.js'), 'utf8'), context);
+  vm.runInContext('setupRefresh()', context);
+  await refreshHandler();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].type, 'GET_MATCHES');
+  assert.equal(requests[0].forceRefresh, true);
+  assert.deepEqual(Array.from(requests[0].competitions), ['PL', 'CL', 'PD', 'SA', 'BL1', 'FL1']);
+  assert.equal(typeof requests[0].dateFrom, 'string');
+  assert.equal(requests[0].dateFrom, requests[0].dateTo);
+  assert.match(elements.get('#matchesList').innerHTML, /rate limit was reached/);
+  assert.doesNotMatch(elements.get('#matchesList').innerHTML, /No matches found/);
+
+  vm.runInContext(`
+    currentMatches = [{ id: 'previous-match' }];
+    applyFiltersAndRender = () => {
+      document.querySelector('#matchesList').innerHTML = 'previously loaded match';
+    };
+  `, context);
+  await refreshHandler();
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].forceRefresh, true);
+  assert.equal(elements.get('#matchesList').innerHTML, 'previously loaded match');
+  assert.match(elements.get('#statusText').textContent, /previously loaded matches/);
+  assert.equal(vm.runInContext('isFetching', context), false);
 });

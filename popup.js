@@ -420,7 +420,7 @@ function setupSubFilters() {
 }
 
 // ── Load Matches ────────────────────────
-async function loadMatches(isSilent = false, specificComps = null) {
+async function loadMatches(isSilent = false, specificComps = null, forceRefresh = false) {
   if (isFetching && !isSilent) return;
   if (!isSilent) isFetching = true;
   if (!isSilent) {
@@ -441,28 +441,43 @@ async function loadMatches(isSilent = false, specificComps = null) {
       dateFrom: from,
       dateTo: to,
       competitions: specificComps || selectedLeagues,
-      forceRefresh: Boolean(targetedKey)
+      forceRefresh: Boolean(targetedKey || forceRefresh)
     });
     if (!res) {
       if (!isSilent) showMatchesError('No response from service worker. Try refreshing.');
       return;
     }
     if (res.success) {
+      const responseMatches = Array.isArray(res.data) ? res.data : [];
+      if (res.hasFetchError && responseMatches.length === 0) {
+        if (currentMatches.length > 0) {
+          applyFiltersAndRender();
+          setStatus('Unable to refresh fixtures. Showing previously loaded matches.');
+        } else {
+          showMatchesError(res.isRateLimited
+            ? 'The provider rate limit was reached before fixtures could be loaded. Try again shortly.'
+            : 'The provider could not load fixtures. Check your connection and try again.');
+        }
+        return;
+      }
+
       if (specificComps && specificComps.length > 0 && !res.isStale) {
-        const updated = res.data || [];
+        const updated = responseMatches;
         const refreshedCompetitions = new Set(specificComps);
         currentMatches = currentMatches.filter(match =>
           !refreshedCompetitions.has(match.competitionCode)
         ).concat(updated);
       } else if (!specificComps || specificComps.length === 0) {
-        currentMatches = res.data || [];
+        currentMatches = responseMatches;
       }
 
       lastFetchTimestamp = Date.now();
       updateLiveBadgeAndEmphasis();
       applyFiltersAndRender();
 
-      if (res.isRateLimited) {
+      if (res.hasFetchError) {
+        setStatus(`Some fixtures could not be refreshed · ${currentMatches.length} available`);
+      } else if (res.isRateLimited) {
         setStatus(`Rate limit reached – showing cached fixtures (${currentMatches.length})`);
       } else if (res.isTruncated) {
         setStatus(`⚠️ Week view limited to 9 days (API cap) · ${currentMatches.length} matches`);
@@ -1153,12 +1168,7 @@ function setupRefresh() {
     if (refreshBtn.classList.contains('spinning')) return;
     refreshBtn.classList.add('spinning');
     try {
-      const response = await sendRuntimeMessage({ type: 'REFRESH' });
-      if (!response?.success) {
-        showMatchesError(response?.error || 'Unable to refresh matches.');
-        return;
-      }
-      await loadMatches();
+      await loadMatches(false, null, true);
     } catch (error) {
       showMatchesError('Connection error. Please try again.');
       console.warn('Refresh request failed:', error.message);
