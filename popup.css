@@ -809,7 +809,23 @@ button:focus-visible, input:focus-visible {
   background: rgba(232,64,0,0.08);
   border-color: rgba(232,64,0,0.35);
 }
-.league-card .league-emoji { font-size: 17px; flex-shrink: 0; }
+.league-card .league-emblem,
+.league-card .league-emblem-fallback {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.league-card .league-emblem { object-fit: contain; }
+.league-card .league-emblem-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-card-hover);
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 700;
+}
 .league-card .league-info { flex: 1; min-width: 0; }
 .league-card .league-name {
   font-size: 11.5px;

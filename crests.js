@@ -427,7 +427,7 @@ var BUNDLED_CRESTS = {
   "vit": "https://a.espncdn.com/i/teamlogos/soccer/500/3457.png",
   "slavia praha": "https://r2.thesportsdb.com/images/media/team/badge/l7kl4n1759252139.png",
   "viking": "https://r2.thesportsdb.com/images/media/team/badge/9mzq961590148192.png",
-  "lask": "https://a.espncdn.com/i/teamlogos/soccer/500/3565.png",
+  "lask": "https://a.espncdn.com/i/teamlogos/soccer/500/4411.png",
   "bod glimt": "https://a.espncdn.com/i/teamlogos/soccer/500/8157.png",
   "inter": "https://a.espncdn.com/i/teamlogos/soccer/500/110.png",
   "bayern munchen": "https://a.espncdn.com/i/teamlogos/soccer/500/132.png",

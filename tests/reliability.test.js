@@ -6,6 +6,8 @@ const vm = require('node:vm');
 
 const root = path.join(__dirname, '..');
 const storageSource = fs.readFileSync(path.join(root, 'storage.js'), 'utf8');
+const crestsSource = fs.readFileSync(path.join(root, 'crests.js'), 'utf8');
+const popupSource = fs.readFileSync(path.join(root, 'popup.js'), 'utf8');
 
 function createStorage(initial = {}) {
   const values = { ...initial };
@@ -37,7 +39,11 @@ function loadStorageHelper(initial = {}) {
   return { helper: context.MatchDayStorage, storage };
 }
 
-function loadWorker({ initialStorage = {}, fetchResponse = async () => ({ ok: false, status: 503 }) } = {}) {
+function loadWorker({
+  initialStorage = {},
+  fetchResponse = async () => ({ ok: false, status: 503 }),
+  withBundledCrests = false
+} = {}) {
   const storage = createStorage(initialStorage);
   let messageListener;
   const chrome = {
@@ -53,6 +59,7 @@ function loadWorker({ initialStorage = {}, fetchResponse = async () => ({ ok: fa
   const context = vm.createContext({
     chrome,
     URL,
+    URLSearchParams,
     fetch: async (url, options) => fetchResponse(String(url), options),
     console: { warn() {} },
     setTimeout,
@@ -60,7 +67,10 @@ function loadWorker({ initialStorage = {}, fetchResponse = async () => ({ ok: fa
   });
   context.importScripts = filename => {
     if (filename === 'storage.js') vm.runInContext(storageSource, context);
-    if (filename === 'crests.js') context.BUNDLED_CRESTS = {};
+    if (filename === 'crests.js') {
+      if (withBundledCrests) vm.runInContext(crestsSource, context);
+      else context.BUNDLED_CRESTS = {};
+    }
   };
   vm.runInContext(fs.readFileSync(path.join(root, 'background.js'), 'utf8'), context);
   return {
@@ -127,6 +137,195 @@ test('team identities include provider and preserve source IDs', () => {
     helper.getTeamIdentity(openFootTeam)
   );
   assert.equal(footballDataTeam.id, 42);
+});
+
+test('bundled badges resolve Bodø/Glimt and LASK variants and override unverified API logos', async () => {
+  const worker = loadWorker({ withBundledCrests: true });
+  const matches = [{
+    homeTeam: {
+      name: 'FK Bodø/Glimt',
+      shortName: 'Bodø/Glimt',
+      crest: 'https://wrong.example/bodo.png'
+    },
+    awayTeam: {
+      name: 'LASK Linz',
+      shortName: 'LASK',
+      crest: 'https://wrong.example/lask.png'
+    }
+  }];
+
+  await vm.runInContext('hydrateCrests(globalThis.testMatches)', Object.assign(worker.context, {
+    testMatches: matches
+  }));
+
+  assert.equal(
+    matches[0].homeTeam.crest,
+    'https://a.espncdn.com/i/teamlogos/soccer/500/8157.png'
+  );
+  assert.equal(
+    matches[0].awayTeam.crest,
+    'https://a.espncdn.com/i/teamlogos/soccer/500/4411.png'
+  );
+  assert.equal(
+    vm.runInContext('lookupCrest("LASK")', worker.context),
+    'https://a.espncdn.com/i/teamlogos/soccer/500/4411.png'
+  );
+  assert.equal(vm.runInContext('lookupCrest("GAL")', worker.context), '');
+});
+
+test('external crest search rejects ambiguous aliases and selects only an exact identity', async () => {
+  const worker = loadWorker({
+    initialStorage: {
+      crest_name_united: {
+        value: 'https://stale-wrong.example/united.png',
+        timestamp: Date.now()
+      }
+    },
+    fetchResponse: async url => {
+      const query = new URL(url).searchParams.get('t');
+      if (query === 'United') {
+        return {
+          ok: true,
+          async json() {
+            return { teams: [
+              { idTeam: '1', strTeam: 'North United', strTeamShort: 'United', strBadge: 'https://wrong.example/north.png' },
+              { idTeam: '2', strTeam: 'South United', strTeamShort: 'United', strBadge: 'https://wrong.example/south.png' }
+            ] };
+          }
+        };
+      }
+      if (query === 'Harbor FC') {
+        return {
+          ok: true,
+          async json() {
+            return { teams: [
+              { idTeam: '3', strTeam: 'Harbor United', strTeamShort: 'Harbor', strBadge: 'https://wrong.example/united.png' },
+              { idTeam: '4', strTeam: 'Harbor FC', strTeamShort: 'HFC', strBadge: 'https://correct.example/harbor.png' }
+            ] };
+          }
+        };
+      }
+      return { ok: false, status: 404 };
+    }
+  });
+
+  const ambiguous = await vm.runInContext('fetchTeamCrest("United")', worker.context);
+  const exact = await vm.runInContext('fetchTeamCrest("Harbor FC")', worker.context);
+
+  assert.equal(ambiguous, null);
+  assert.equal(exact, 'https://correct.example/harbor.png');
+  assert.equal(
+    Object.keys(worker.storage.values).some(key => key.startsWith('crest_name_verified_v2_united')),
+    false
+  );
+  assert.equal(
+    worker.storage.values.crest_name_verified_v2_harbor_fc.value,
+    'https://correct.example/harbor.png'
+  );
+});
+
+test('GET_LEAGUES attaches validated emblems for every supported competition', async () => {
+  const leaguesByCountry = {
+    England: ['English Premier League', 'English Championship'],
+    Europe: ['UEFA Champions League', 'UEFA Nations League'],
+    Spain: ['Spanish La Liga'],
+    Germany: ['German Bundesliga'],
+    Italy: ['Italian Serie A'],
+    France: ['French Ligue 1'],
+    Portugal: ['Portuguese Primeira Liga'],
+    Netherlands: ['Dutch Eredivisie'],
+    Brazil: ['Brazilian Serie A'],
+    International: ['FIFA World Cup']
+  };
+  const worker = loadWorker({
+    fetchResponse: async url => {
+      const country = new URL(url).searchParams.get('c');
+      const countries = (leaguesByCountry[country] || []).map((strLeague, index) => ({
+        idLeague: `${country}-${index}`,
+        strLeague,
+        strSport: 'Soccer',
+        strBadge: `https://r2.thesportsdb.com/images/media/league/badge/${country}-${index}.png`
+      }));
+      return { ok: true, async json() { return { countries }; } };
+    }
+  });
+
+  const response = await worker.send({ type: 'GET_LEAGUES' });
+  const codes = Object.keys(response.data);
+
+  assert.equal(response.success, true);
+  assert.equal(codes.length, 12);
+  for (const code of codes) {
+    assert.match(response.data[code].emblemUrl, /^https:\/\/r2\.thesportsdb\.com\/images\/media\/league\/badge\//, `missing validated emblem for ${code}`);
+  }
+  assert.equal(vm.runInContext(
+    'isAllowedLeagueBadge("https://r2.thesportsdb.com/images/media/league/badge/example.png")',
+    worker.context
+  ), true);
+  assert.equal(vm.runInContext(
+    'isAllowedLeagueBadge("https://example.com/images/media/league/badge/example.png")',
+    worker.context
+  ), false);
+  assert.equal(vm.runInContext(
+    'isAllowedLeagueBadge("http://r2.thesportsdb.com/images/media/league/badge/example.png")',
+    worker.context
+  ), false);
+});
+
+test('league emblem markup has accessible labels and an accessible failure fallback', () => {
+  let errorHandler;
+  const document = {
+    addEventListener(type, handler) {
+      if (type === 'error') errorHandler = handler;
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    createElement(tagName) {
+      return {
+        tagName: tagName.toUpperCase(),
+        attributes: {},
+        setAttribute(name, value) { this.attributes[name] = value; }
+      };
+    }
+  };
+  const context = vm.createContext({
+    chrome: { runtime: { sendMessage() {} } },
+    document,
+    MatchDayStorage: {
+      DEFAULT_PROVIDER: 'openfoot',
+      DEFAULT_SOURCES: { vipbox: 'https://vipbox.ga', hoofoot: 'https://hoofoot.net' },
+      getTeamIdentity() { return null; },
+      isAllowedMatchUrl() { return false; }
+    },
+    URL,
+    console: { warn() {} },
+    setTimeout,
+    clearTimeout
+  });
+  vm.runInContext(popupSource, context);
+
+  const image = vm.runInContext(
+    'leagueEmblemHtml({ name: "Premier League", emblemUrl: "https://r2.thesportsdb.com/images/media/league/badge/pl.png" }, "PL")',
+    context
+  );
+  const fallback = vm.runInContext('leagueEmblemHtml({ name: "World Cup" }, "WC")', context);
+  let replacedWith;
+  const failedImage = {
+    tagName: 'IMG',
+    alt: 'Premier League emblem',
+    dataset: { fallback: 'PL' },
+    classList: { contains(name) { return name === 'league-emblem'; } },
+    replaceWith(element) { replacedWith = element; }
+  };
+  errorHandler({ target: failedImage });
+
+  assert.match(image, /alt="Premier League emblem"/);
+  assert.match(image, /class="league-emblem"/);
+  assert.match(fallback, /role="img" aria-label="World Cup emblem unavailable"/);
+  assert.equal(replacedWith.className, 'league-emblem-fallback');
+  assert.equal(replacedWith.attributes.role, 'img');
+  assert.equal(replacedWith.attributes['aria-label'], 'Premier League emblem unavailable');
+  assert.equal(replacedWith.textContent, 'PL');
 });
 
 test('scheduled matches past kickoff keep their API status and expose elapsed time only', async () => {
@@ -279,6 +478,78 @@ test('forced targeted match refresh bypasses provider cache and replaces empty r
   assert.ok(Object.keys(worker.storage.values).some(key =>
     key.startsWith('master_matches_football_data_')
   ));
+});
+
+test('concurrent identical match requests share one provider API call', async () => {
+  let apiCalls = 0;
+  const worker = loadWorker({
+    initialStorage: { apiProvider: 'openfoot', apiKey: 'of-key' },
+    fetchResponse: async url => {
+      if (url.startsWith('https://openfootapi.com/')) {
+        apiCalls++;
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return { ok: true, async json() { return { data: [] }; } };
+      }
+      return { ok: false, status: 503 };
+    }
+  });
+  const request = {
+    type: 'GET_MATCHES',
+    dateFrom: '2099-01-01',
+    dateTo: '2099-01-01',
+    competitions: ['PL'],
+    forceRefresh: true
+  };
+
+  const [first, second] = await Promise.all([
+    worker.send(request),
+    worker.send(request)
+  ]);
+
+  assert.equal(first.success, true);
+  assert.equal(second.success, true);
+  assert.equal(first.data.length, 0);
+  assert.equal(second.data.length, 0);
+  assert.equal(apiCalls, 1);
+});
+
+test('match loading fetches its stream schedule while the provider request is in flight', async () => {
+  let releaseProviderRequest;
+  let providerRequestStarted;
+  const providerStarted = new Promise(resolve => { providerRequestStarted = resolve; });
+  let streamScheduleRequested = false;
+  const worker = loadWorker({
+    initialStorage: { apiProvider: 'openfoot', apiKey: 'of-key' },
+    fetchResponse: async url => {
+      if (url.startsWith('https://openfootapi.com/')) {
+        providerRequestStarted();
+        await new Promise(resolve => { releaseProviderRequest = resolve; });
+        return { ok: true, async json() { return { data: [] }; } };
+      }
+      if (url === 'https://vipbox.ga/football-schedule') {
+        streamScheduleRequested = true;
+        return { ok: true, async text() { return '<html></html>'; } };
+      }
+      return { ok: false, status: 503 };
+    }
+  });
+
+  const pendingResponse = worker.send({
+    type: 'GET_MATCHES',
+    dateFrom: '2099-01-01',
+    dateTo: '2099-01-01',
+    competitions: ['PL']
+  });
+  await providerStarted;
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  try {
+    assert.equal(streamScheduleRequested, true);
+  } finally {
+    releaseProviderRequest();
+  }
+
+  assert.equal((await pendingResponse).success, true);
 });
 
 test('malformed provider payloads are reported as fetch errors and are not cached as empty matches', async () => {

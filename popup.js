@@ -96,7 +96,14 @@ function makeInitialsAvatarHtml(name) {
 
 // ── Error Boundary for Images (replace broken img with initials avatar) ──
 document.addEventListener('error', (e) => {
-  if (e.target && e.target.tagName === 'IMG' && e.target.classList.contains('team-crest')) {
+  if (e.target && e.target.tagName === 'IMG' && e.target.classList.contains('league-emblem')) {
+    const fallback = document.createElement('span');
+    fallback.className = 'league-emblem-fallback';
+    fallback.setAttribute('role', 'img');
+    fallback.setAttribute('aria-label', `${e.target.alt || 'League emblem'} unavailable`);
+    fallback.textContent = e.target.dataset.fallback || '?';
+    e.target.replaceWith(fallback);
+  } else if (e.target && e.target.tagName === 'IMG' && e.target.classList.contains('team-crest')) {
     const name = e.target.alt || e.target.closest('[data-team-name]')?.dataset.teamName || '?';
     const temp = document.createElement('div');
     temp.innerHTML = makeInitialsAvatarHtml(name);
@@ -944,6 +951,14 @@ function showMatchesError(message, isOffline = false) {
 }
 
 // ── Render Leagues Tab ──────────────────
+function leagueEmblemHtml(league, code) {
+  const alt = `${league.name} emblem`;
+  if (league.emblemUrl) {
+    return `<img class="league-emblem" src="${escapeHtml(league.emblemUrl)}" alt="${escapeHtml(alt)}" data-fallback="${escapeHtml(code)}" loading="lazy" />`;
+  }
+  return `<span class="league-emblem-fallback" role="img" aria-label="${escapeHtml(alt)} unavailable">${escapeHtml(code)}</span>`;
+}
+
 function renderLeagues() {
   const codes = Object.keys(allLeagues);
   leaguesGrid.innerHTML = codes.map(code => {
@@ -951,7 +966,7 @@ function renderLeagues() {
     const isSelected = selectedLeagues.includes(code);
     return `
       <div class="league-card ${isSelected ? 'selected' : ''}" data-code="${escapeHtml(code)}" role="checkbox" aria-checked="${isSelected}" tabindex="0">
-        <span class="league-emoji" aria-hidden="true">${escapeHtml(league.emoji)}</span>
+        ${leagueEmblemHtml(league, code)}
         <div class="league-info">
           <div class="league-name">${escapeHtml(league.name)}</div>
           <div class="league-country">${escapeHtml(league.country)}</div>

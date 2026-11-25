@@ -37,6 +37,7 @@ const STALE_FALLBACK_TTL     = 24 * 60 * 60 * 1000;      // 24 hours stale fallb
 const TEAMS_CACHE_TTL        = 14 * 24 * 60 * 60 * 1000; // 14 days
 const HOOFOOT_INDEX_TTL      = 30 * 60 * 1000;            // 30 minutes
 const CRESTS_CACHE_TTL       = 30 * 24 * 60 * 60 * 1000; // 30 days
+const _pendingApiFetches = new Map();
 
 // ── League definitions ───────────────────
 // Verified real IDs from GET /v1/competitions
@@ -73,6 +74,99 @@ const TSDB_LEAGUE_NAMES = {
   BSA: 'Brazilian Serie A',
 };
 
+const LEAGUE_BADGE_SEARCHES = [
+  { country: 'England', codes: ['PL', 'ELC'] },
+  { country: 'Europe', codes: ['CL', 'EC'] },
+  { country: 'Spain', codes: ['PD'] },
+  { country: 'Germany', codes: ['BL1'] },
+  { country: 'Italy', codes: ['SA'] },
+  { country: 'France', codes: ['FL1'] },
+  { country: 'Portugal', codes: ['PPL'] },
+  { country: 'Netherlands', codes: ['DED'] },
+  { country: 'Brazil', codes: ['BSA'] },
+  { country: 'International', codes: ['WC'] }
+];
+
+const LEAGUE_BADGE_NAMES = {
+  CL: ['UEFA Champions League', 'Champions League'],
+  PL: ['English Premier League', 'Premier League'],
+  PD: ['Spanish La Liga', 'La Liga'],
+  BL1: ['German Bundesliga', 'Bundesliga'],
+  SA: ['Italian Serie A', 'Serie A'],
+  FL1: ['French Ligue 1', 'Ligue 1'],
+  ELC: ['English Championship', 'English League Championship', 'EFL Championship'],
+  PPL: ['Portuguese Primeira Liga', 'Primeira Liga', 'Liga Portugal'],
+  DED: ['Dutch Eredivisie', 'Eredivisie'],
+  BSA: ['Brazilian Serie A', 'Campeonato Brasileiro Serie A', 'Campeonato Brasileiro Série A'],
+  EC: ['UEFA Nations League', 'UEFA European Championship', 'European Championship'],
+  WC: ['FIFA World Cup', 'World Cup']
+};
+const LEAGUE_BADGE_CACHE_KEY = 'league_badges_v1';
+const LEAGUE_BADGE_RETRY_TTL = 6 * 60 * 60 * 1000;
+
+function isAllowedLeagueBadge(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' &&
+      parsed.hostname === 'r2.thesportsdb.com' &&
+      parsed.pathname.startsWith('/images/media/league/badge/');
+  } catch {
+    return false;
+  }
+}
+
+async function fetchLeagueBadges() {
+  const cached = await getCachedWithStale(LEAGUE_BADGE_CACHE_KEY, CRESTS_CACHE_TTL);
+  const badges = cached?.value?.badges || {};
+  const allCodesHaveBadges = Object.keys(LEAGUES).every(code => isAllowedLeagueBadge(badges[code]));
+
+  if (cached && !cached.isStale &&
+      (allCodesHaveBadges || Date.now() - cached.timestamp < LEAGUE_BADGE_RETRY_TTL)) {
+    return badges;
+  }
+
+  let queriedCountry = false;
+  for (const search of LEAGUE_BADGE_SEARCHES) {
+    const missingCodes = search.codes.filter(code => !isAllowedLeagueBadge(badges[code]));
+    if (missingCodes.length === 0) continue;
+
+    if (queriedCountry) await new Promise(resolve => setTimeout(resolve, 200));
+    queriedCountry = true;
+
+    try {
+      const params = new URLSearchParams({ c: search.country, s: 'Soccer' });
+      const response = await fetch(`${TSDB_BASE}/search_all_leagues.php?${params}`, {
+        cache: 'no-store'
+      });
+      if (!response.ok) {
+        console.warn(`League badge lookup failed for ${search.country}: HTTP ${response.status}`);
+        continue;
+      }
+
+      const json = await response.json();
+      if (!Array.isArray(json?.countries)) {
+        console.warn(`League badge lookup returned an invalid response for ${search.country}`);
+        continue;
+      }
+
+      for (const code of missingCodes) {
+        const names = new Set(LEAGUE_BADGE_NAMES[code].map(normaliseName));
+        const matches = json.countries.filter(league =>
+          league.strSport === 'Soccer' &&
+          names.has(normaliseName(league.strLeague)) &&
+          isAllowedLeagueBadge(league.strBadge)
+        );
+        if (matches.length === 1) badges[code] = matches[0].strBadge;
+      }
+    } catch (error) {
+      console.warn(`League badge lookup failed for ${search.country}:`, error.message);
+    }
+  }
+
+  await setCache(LEAGUE_BADGE_CACHE_KEY, { badges });
+  return badges;
+}
+
 // ── In-memory crest map: lowercase teamName → logo URL ───────────────────
 // Populated lazily; shared across the service worker's lifetime.
 const _crestMemCache = new Map();
@@ -90,19 +184,47 @@ function normaliseName(name) {
     .replace(/\s+/g, ' ');
 }
 
+function crestLookupKeys(teamName) {
+  const keys = new Set();
+  let key = normaliseName(teamName);
+  if (!key) return [];
+  keys.add(key);
+
+  const clubMarker = /^(?:afc|fc|cf|sc|ac|as|ss|sv|vfb|tsv|rcd|rc|sk|cd|ud|sd|fk|club)\s+|\s+(?:afc|fc|cf|sc|ac|as|ss|sv|vfb|tsv|rcd|rc|sk|cd|ud|sd|fk|club)$/;
+  while (clubMarker.test(key)) {
+    key = key.replace(clubMarker, '').trim();
+    if (key) keys.add(key);
+  }
+  return [...keys];
+}
+
 // Get crest URL from memory, bundled catalog, or storage (0ms, 0 network)
 function lookupCrest(teamName) {
   if (!teamName) return '';
-  const key = normaliseName(teamName);
-  if (_crestMemCache.has(key)) return _crestMemCache.get(key);
-
-  // Check bundled ESPN crest catalog
-  if (typeof BUNDLED_CRESTS !== 'undefined' && BUNDLED_CRESTS[key]) {
-    const url = BUNDLED_CRESTS[key];
-    _crestMemCache.set(key, url);
-    return url;
+  const keys = crestLookupKeys(teamName).filter(key => key.length >= 4);
+  for (const key of keys) {
+    if (typeof BUNDLED_CRESTS !== 'undefined' && BUNDLED_CRESTS[key]) {
+      const url = BUNDLED_CRESTS[key];
+      _crestMemCache.set(normaliseName(teamName), url);
+      return url;
+    }
+  }
+  for (const key of keys) {
+    if (_crestMemCache.has(key)) return _crestMemCache.get(key);
   }
   return '';
+}
+
+function findExactTeamCrest(teamName, teams) {
+  const expectedName = normaliseName(teamName);
+  if (!expectedName || !Array.isArray(teams)) return null;
+
+  const matches = teams.filter(team =>
+    [team.strTeam, team.strTeamShort, team.strTeamAlternate]
+      .some(name => normaliseName(name) === expectedName)
+  );
+  if (matches.length !== 1) return null;
+  return matches[0].strBadge || matches[0].strTeamBadge || null;
 }
 
 // Batch-fetch crests for one domestic league from TheSportsDB.
@@ -160,7 +282,7 @@ async function fetchTeamCrest(teamName) {
   if (existing) return existing;
 
   // 2. Check storage
-  const storageKey = `crest_name_${key.replace(/\s/g, '_')}`;
+  const storageKey = `crest_name_verified_v2_${key.replace(/\s/g, '_')}`;
   const cached = await getCachedWithStale(storageKey, CRESTS_CACHE_TTL);
   if (cached && !cached.isStale && cached.value) {
     _crestMemCache.set(key, cached.value);
@@ -179,7 +301,7 @@ async function fetchTeamCrest(teamName) {
       );
       if (!res.ok) return null;
       const json = await res.json();
-      const badge = json?.teams?.[0]?.strBadge || json?.teams?.[0]?.strTeamBadge || null;
+      const badge = findExactTeamCrest(teamName, json?.teams);
       if (badge) {
         _crestMemCache.set(key, badge);
         await setCache(storageKey, badge);
@@ -204,12 +326,10 @@ async function hydrateCrests(matches) {
   // Step 1: Instant lookup from bundled catalog (covers 99%+ of matches)
   const stillMissing = [];
   for (const m of matches) {
-    if (!m.homeTeam.crest) {
-      m.homeTeam.crest = lookupCrest(m.homeTeam?.name) || lookupCrest(m.homeTeam?.shortName) || '';
-    }
-    if (!m.awayTeam.crest) {
-      m.awayTeam.crest = lookupCrest(m.awayTeam?.name) || lookupCrest(m.awayTeam?.shortName) || '';
-    }
+    m.homeTeam.crest = lookupCrest(m.homeTeam?.name) ||
+      lookupCrest(m.homeTeam?.shortName) || m.homeTeam.crest || '';
+    m.awayTeam.crest = lookupCrest(m.awayTeam?.name) ||
+      lookupCrest(m.awayTeam?.shortName) || m.awayTeam.crest || '';
     if (!m.homeTeam.crest && m.homeTeam?.name) stillMissing.push(m.homeTeam);
     if (!m.awayTeam.crest && m.awayTeam?.name) stillMissing.push(m.awayTeam);
   }
@@ -310,15 +430,29 @@ async function apiFetch(endpoint, params = {}) {
     ? { 'X-Auth-Token': apiKey }
     : { 'Authorization': `Bearer ${apiKey}` };
 
-  const response = await fetch(url.toString(), { headers });
+  const requestKey = `${provider}:${url.toString()}`;
+  const pending = _pendingApiFetches.get(requestKey);
+  if (pending?.apiKey === apiKey) return pending.promise;
 
-  if (!response.ok) {
-    if (response.status === 429) throw new Error('RATE_LIMIT');
-    if (response.status === 401 || response.status === 403) throw new Error('INVALID_API_KEY');
-    throw new Error(`API_ERROR_${response.status}`);
+  const promise = (async () => {
+    const response = await fetch(url.toString(), { headers });
+    if (!response.ok) {
+      if (response.status === 429) throw new Error('RATE_LIMIT');
+      if (response.status === 401 || response.status === 403) throw new Error('INVALID_API_KEY');
+      throw new Error(`API_ERROR_${response.status}`);
+    }
+
+    return response.json();
+  })();
+  _pendingApiFetches.set(requestKey, { apiKey, promise });
+
+  try {
+    return await promise;
+  } finally {
+    if (_pendingApiFetches.get(requestKey)?.promise === promise) {
+      _pendingApiFetches.delete(requestKey);
+    }
   }
-
-  return response.json();
 }
 
 // ── Cache Helper with Stale-While-Revalidate ──
@@ -740,6 +874,8 @@ async function fetchMatches(dateFrom, dateTo, competitions = [], options = {}) {
 
   const { provider } = await getActiveProvider();
   const masterKey = `master_matches_${provider}_${dateFrom}_${dateTo}_${[...comps].sort().join(',')}`;
+  const vipSchedulePromise = getVipboxSchedule();
+  const settingsPromise = MatchDayStorage.getSettings();
 
   let rawMatches = [];
   let anyRateLimited = false;
@@ -777,8 +913,7 @@ async function fetchMatches(dateFrom, dateTo, competitions = [], options = {}) {
   await hydrateCrests(filtered);
 
   // Step 6: Enrich with VIPBox & HooFoot URLs
-  const vipSchedule = await getVipboxSchedule();
-  const settings = await MatchDayStorage.getSettings();
+  const [vipSchedule, settings] = await Promise.all([vipSchedulePromise, settingsPromise]);
   const enriched = await Promise.all(filtered.map(m => enrichMatch(m, vipSchedule, settings)));
 
   // Master fallback cache
@@ -1036,7 +1171,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         case 'GET_LEAGUES': {
-          sendResponse({ success: true, data: LEAGUES });
+          const badges = await fetchLeagueBadges();
+          const leagues = Object.fromEntries(Object.entries(LEAGUES).map(([code, league]) => [
+            code,
+            { ...league, emblemUrl: badges[code] || '' }
+          ]));
+          sendResponse({ success: true, data: leagues });
           break;
         }
         case 'REFRESH': {
